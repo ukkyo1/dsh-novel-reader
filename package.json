@@ -3,7 +3,15 @@
   "version": "0.6.0",
   "description": "Read local txt novels through the chat dialog: pick a novel beside the model selector, one message reads one chapter, and progress is remembered.",
   "license": "MIT",
-  "author": "dsh-novel-reader contributors",
+  "author": "ukkyo1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ukkyo1/dsh-novel-reader.git"
+  },
+  "homepage": "https://github.com/ukkyo1/dsh-novel-reader",
+  "bugs": {
+    "url": "https://github.com/ukkyo1/dsh-novel-reader/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"
