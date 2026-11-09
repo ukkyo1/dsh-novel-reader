@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tgz
+*.zip
+.DS_Store
+Thumbs.db
+.reader-state.json
+*.log

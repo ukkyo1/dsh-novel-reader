@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Novel reader">
+  <defs>
+    <linearGradient id="nr-cover" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3f6fd8"/>
+      <stop offset="1" stop-color="#24479e"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="10" width="52" height="44" rx="7" fill="url(#nr-cover)"/>
+  <rect x="14" y="10" width="6" height="44" fill="#1d3579" opacity="0.55"/>
+  <path d="M27 22h21M27 30h21M27 38h14" stroke="#eaf0ff" stroke-width="3" stroke-linecap="round"/>
+  <path d="M47 10v12l-4-3-4 3V10z" fill="#f6c453"/>
+</svg>

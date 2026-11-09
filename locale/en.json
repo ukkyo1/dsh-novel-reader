@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Novel reader",
+    "description": "Read local txt novels through the chat dialog. Pick a novel beside the model selector and every message continues the story; reading progress is remembered."
+  }
+}

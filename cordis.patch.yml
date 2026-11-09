@@ -1,0 +1,27 @@
+- insert:
+    - id: novel-reader
+      name: dsh-novel-reader
+      config:
+        # 每段回复的字数（章节模式下只在没有章节标题时作为兜底）
+        chunkChars: 420
+        # 每个流式片段（4 字）之间的延迟（毫秒，0-500）；55 ≈ 60-90 字/秒
+        streamDelayMs: 55
+        # 章节模式下的出字延迟（长章节快一些）
+        chapterDelayMs: 18
+        # 首字延迟（毫秒，0-3000）：真实模型出第一个字前会思考一小会儿
+        firstTokenDelayMs: 350
+        # thinking = 正文放进「思考」块，可见回复是固定总结；answer = 正文就是可见回复
+        display: thinking
+        # 自定义可见总结（留空用内置长报告）；支持 {title} {percent} {offset} {total}
+        summaryTemplate: ""
+        # 章节阅读：true = 每条消息读一整章；没有章节标题时自动退回按字数切段
+        chapters: true
+        # 纯数字消息（1、2、3…）跳到对应序号的章节并直接读它
+        numberedJump: true
+        # 单条回复最多输出的章节字数；0 = 不限（整章一次读完）
+        maxChapterChars: 0
+        # 会话标题；留空用内置的普通工作型标题池（不会出现书名）
+        sessionTitle: ""
+        # 小说目录；留空 = <DSH_HOME>/novels。留空时可以在「设置 → 小说阅读」里直接改目录；
+        # 填了绝对路径则目录被配置固定，设置页只能看不能改。
+        directory: ""
