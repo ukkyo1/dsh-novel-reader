@@ -4,11 +4,13 @@
       config:
         # 每段回复的字数（章节模式下只在没有章节标题时作为兜底）
         chunkChars: 420
-        # 每个流式片段（4 字）之间的延迟（毫秒，0-500）；55 ≈ 60-90 字/秒
-        streamDelayMs: 55
-        # 章节模式下的出字延迟（长章节快一些）
-        chapterDelayMs: 18
-        # 首字延迟（毫秒，0-3000）：真实模型出第一个字前会思考一小会儿
+        # 出字方式：instant = 瞬间生成；duration = 整条回复用固定秒数；speed = 固定字/秒
+        streamMode: duration
+        # duration 模式的秒数（0.5-60）
+        streamSeconds: 4
+        # speed 模式的速度（字/秒，10-5000）
+        streamCharsPerSecond: 200
+        # 首字延迟（毫秒，0-3000）；instant 模式下忽略
         firstTokenDelayMs: 350
         # thinking = 正文放进「思考」块，可见回复是固定总结；answer = 正文就是可见回复
         display: thinking

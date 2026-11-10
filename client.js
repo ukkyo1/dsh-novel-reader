@@ -66,6 +66,11 @@
         pageMaxWidth: 0,
         fontFamily: '',
       };
+      var DEFAULT_GENERATION = {
+        mode: 'duration',
+        seconds: 4,
+        charsPerSecond: 200,
+      };
       var readingStyleCache = null;
       var readingStylePending = null;
       var readingStyleListeners = new Set();
@@ -124,6 +129,17 @@
         'settings.style.reset': '恢复默认样式',
         'settings.style.saved': '样式已保存',
         'settings.style.hint': '只影响阅读模式下「思考」里的翻页正文；普通模型的思考不受影响。',
+        'settings.generation.title': '生成速度',
+        'settings.generation.hint': '控制阅读模式下正文出现的节奏；只影响阅读模式，不影响真实模型回复。',
+        'settings.generation.mode': '方式',
+        'settings.generation.instant': '瞬间生成',
+        'settings.generation.duration': '指定秒数',
+        'settings.generation.speed': '按字/秒',
+        'settings.generation.seconds': '整段秒数',
+        'settings.generation.cps': '字/秒',
+        'settings.generation.save': '保存速度',
+        'settings.generation.reset': '恢复默认速度',
+        'settings.generation.saved': '速度已保存',
         'reading.page': '第 {index}/{total} 页',
         'reading.prev': '上一页',
         'reading.next': '下一页',
@@ -180,6 +196,17 @@
         'settings.style.reset': 'Reset style',
         'settings.style.saved': 'Style saved',
         'settings.style.hint': 'Affects only the paged excerpt inside the thinking block; normal model reasoning is untouched.',
+        'settings.generation.title': 'Generation speed',
+        'settings.generation.hint': 'Controls how fast the reading excerpt appears. Reading mode only; real model replies are unaffected.',
+        'settings.generation.mode': 'Mode',
+        'settings.generation.instant': 'Instant',
+        'settings.generation.duration': 'Fixed seconds',
+        'settings.generation.speed': 'Characters per second',
+        'settings.generation.seconds': 'Seconds',
+        'settings.generation.cps': 'Chars/sec',
+        'settings.generation.save': 'Save speed',
+        'settings.generation.reset': 'Reset speed',
+        'settings.generation.saved': 'Speed saved',
         'reading.page': 'Page {index}/{total}',
         'reading.prev': 'Previous page',
         'reading.next': 'Next page',
@@ -568,6 +595,12 @@
 .dnr-style-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .dnr-style-field--wide { grid-column: 1 / -1; }
 .dnr-style-label { font-size: 12px; line-height: 1.4; color: var(--dsw-alias-label-secondary, #6b6b6b); }
+.dnr-gen-modes { display: flex; flex-wrap: wrap; gap: 8px; }
+.dnr-gen-mode--active {
+  border-color: var(--dsw-alias-brand-primary, #3d63e6);
+  color: var(--dsw-alias-brand-primary, #3d63e6);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .12));
+}
 .dnr-input--style {
   flex: 0 0 auto;
   width: 100%;
@@ -745,6 +778,22 @@
         };
       }
 
+      function normalizeGeneration(value) {
+        var source = value && typeof value === 'object' ? value : {};
+        var mode = source.mode === 'instant' || source.mode === 'duration' || source.mode === 'speed'
+          ? source.mode
+          : DEFAULT_GENERATION.mode;
+        var seconds = Number(source.seconds);
+        var charsPerSecond = Number(source.charsPerSecond);
+        return {
+          mode: mode,
+          seconds: isFinite(seconds) ? Math.min(60, Math.max(0.5, seconds)) : DEFAULT_GENERATION.seconds,
+          charsPerSecond: isFinite(charsPerSecond)
+            ? Math.min(5000, Math.max(10, Math.round(charsPerSecond)))
+            : DEFAULT_GENERATION.charsPerSecond,
+        };
+      }
+
       function fetchReadingStyle(rpc) {
         if (readingStyleCache !== null) return Promise.resolve(readingStyleCache);
         if (readingStylePending !== null) return readingStylePending;
@@ -912,7 +961,8 @@
           if (!measure) return;
           var sheetWidth = style.pageMaxWidth > 0 ? Math.min(width, style.pageMaxWidth) : width;
           var contentWidth = Math.max(80, sheetWidth - style.pagePadding * 2);
-          var capacity = Math.max(60, style.pageHeight - style.pagePadding * 2);
+          // 多留一点余量：不同字体/缩放下测量可能差一两像素，宁可少排一行也不要溢出。
+          var capacity = Math.max(40, style.pageHeight - style.pagePadding * 2 - Math.max(4, Math.round(style.fontSize * 0.6)));
           measure.style.width = contentWidth + 'px';
           var gap = Math.round(style.paragraphSpacing * style.fontSize);
           var heightOf = function (value) {
@@ -1050,9 +1100,10 @@
         var runningStyle = {
           position: 'relative',
           width: '100%',
-          minHeight: '60px',
+          height: style.pageHeight + 'px',
           boxSizing: 'border-box',
           padding: style.pagePadding + 'px',
+          overflow: 'hidden',
           background: 'var(--dsw-alias-bg-base, #ffffff)',
         };
         return h('div', { className: 'dnr-reader', ref: containerRef },
@@ -1096,7 +1147,9 @@
               onClick: function () { goTo(pageIndex + 1); },
             }, t('reading.next') + ' ›')),
           h('div', { className: 'dnr-reader-footer-hint' },
-            pages.length > 0 && pageIndex < pages.length - 1 ? t('reading.zoneHint') : t('reading.end'))
+            props.running
+              ? t('reading.generating')
+              : (pages.length > 0 && pageIndex < pages.length - 1 ? t('reading.zoneHint') : t('reading.end')))
         );
       }
 
@@ -1522,11 +1575,28 @@
         var styleNoticed = styleNoticedState[0];
         var setStyleNoticed = styleNoticedState[1];
 
+        var genDraftState = useState(null);
+        var genDraft = genDraftState[0];
+        var setGenDraft = genDraftState[1];
+
+        var genDefaultsState = useState(null);
+        var genDefaults = genDefaultsState[0];
+        var setGenDefaults = genDefaultsState[1];
+
+        var genBusyState = useState(false);
+        var genBusy = genBusyState[0];
+        var setGenBusy = genBusyState[1];
+
+        var genNoticedState = useState(false);
+        var genNoticed = genNoticedState[0];
+        var setGenNoticed = genNoticedState[1];
+
         var aliveRef = useRef(true);
         var requestSeq = useRef(0);
         var savedTimer = useRef(null);
         var dirTimer = useRef(null);
         var styleTimer = useRef(null);
+        var genTimer = useRef(null);
 
         useEffect(function () {
           aliveRef.current = true;
@@ -1544,6 +1614,10 @@
               clearTimeout(styleTimer.current);
               styleTimer.current = null;
             }
+            if (genTimer.current !== null) {
+              clearTimeout(genTimer.current);
+              genTimer.current = null;
+            }
           };
         }, []);
 
@@ -1555,6 +1629,13 @@
             setStyleDefaults(value && value.defaults ? normalizeReadingStyle(value.defaults) : normalizeReadingStyle(null));
           }, function () {
             if (aliveRef.current) setStyleDraft(normalizeReadingStyle(null));
+          });
+          invoke(rpcRef.current, 'generation', {}).then(function (value) {
+            if (!aliveRef.current) return;
+            setGenDraft(normalizeGeneration(value));
+            setGenDefaults(value && value.defaults ? normalizeGeneration(value.defaults) : normalizeGeneration(null));
+          }, function () {
+            if (aliveRef.current) setGenDraft(normalizeGeneration(null));
           });
         }, []);
 
@@ -1819,6 +1900,115 @@
           if (savedId === novelId) setSavedId(null);
         };
 
+        var saveGeneration = function (payload) {
+          if (genBusy) return;
+          setGenBusy(true);
+          setError('');
+          setGenNoticed(false);
+          invoke(rpcRef.current, 'setGeneration', { generation: payload }).then(function (value) {
+            if (!aliveRef.current) return;
+            setGenDraft(normalizeGeneration(value));
+            setGenDefaults(value && value.defaults ? normalizeGeneration(value.defaults) : normalizeGeneration(null));
+            setGenNoticed(true);
+            if (genTimer.current !== null) clearTimeout(genTimer.current);
+            genTimer.current = setTimeout(function () {
+              genTimer.current = null;
+              if (aliveRef.current) setGenNoticed(false);
+            }, SAVED_FLASH_MS);
+          }, function (failure) {
+            if (!aliveRef.current) return;
+            setError(errorText(failure));
+          }).then(function () {
+            if (!aliveRef.current) return;
+            setGenBusy(false);
+          });
+        };
+
+        var editGeneration = function (name, raw) {
+          setGenDraft(function (previous) {
+            var next = Object.assign({}, previous || DEFAULT_GENERATION);
+            next[name] = raw;
+            return next;
+          });
+          setGenNoticed(false);
+        };
+
+        var generationPayloadFromDraft = function (draft) {
+          var source = draft || DEFAULT_GENERATION;
+          return {
+            mode: source.mode,
+            seconds: Number(source.seconds),
+            charsPerSecond: Number(source.charsPerSecond),
+          };
+        };
+
+        var generationModeNodes = [
+          ['instant', 'settings.generation.instant'],
+          ['duration', 'settings.generation.duration'],
+          ['speed', 'settings.generation.speed'],
+        ].map(function (entry) {
+          var active = genDraft !== null && genDraft.mode === entry[0];
+          return h('button', {
+            key: entry[0],
+            type: 'button',
+            className: 'dnr-btn dnr-gen-mode' + (active ? ' dnr-gen-mode--active' : ''),
+            'aria-pressed': active,
+            disabled: genBusy,
+            onClick: function () {
+              setGenDraft(function (previous) {
+                var next = Object.assign({}, previous || DEFAULT_GENERATION);
+                next.mode = entry[0];
+                return next;
+              });
+              setGenNoticed(false);
+            },
+          }, t(entry[1]));
+        });
+
+        var generationValueNode = null;
+        if (genDraft !== null && genDraft.mode === 'duration') {
+          generationValueNode = h('label', { className: 'dnr-style-field' },
+            h('span', { className: 'dnr-style-label' }, t('settings.generation.seconds')),
+            h('input', {
+              className: 'dnr-input dnr-input--style',
+              type: 'number',
+              step: '0.5',
+              value: genDraft.seconds === undefined ? '' : String(genDraft.seconds),
+              onChange: function (event) { editGeneration('seconds', event.target.value); },
+            }));
+        } else if (genDraft !== null && genDraft.mode === 'speed') {
+          generationValueNode = h('label', { className: 'dnr-style-field' },
+            h('span', { className: 'dnr-style-label' }, t('settings.generation.cps')),
+            h('input', {
+              className: 'dnr-input dnr-input--style',
+              type: 'number',
+              step: '10',
+              value: genDraft.charsPerSecond === undefined ? '' : String(genDraft.charsPerSecond),
+              onChange: function (event) { editGeneration('charsPerSecond', event.target.value); },
+            }));
+        }
+
+        var generationCard = h('div', { className: 'dnr-style-card' },
+          h('div', { className: 'dnr-style-head' },
+            h('div', { className: 'dnr-settings-title' }, t('settings.generation.title')),
+            genNoticed ? h('span', { className: 'dnr-novel-saved' }, t('settings.generation.saved')) : null),
+          h('p', { className: 'dnr-settings-folder-note' }, t('settings.generation.hint')),
+          h('div', { className: 'dnr-gen-modes' }, generationModeNodes),
+          generationValueNode,
+          h('div', { className: 'dnr-settings-toolbar' },
+            h('button', {
+              type: 'button',
+              className: 'dnr-btn',
+              disabled: genBusy,
+              onClick: function () { saveGeneration(generationPayloadFromDraft(genDraft)); },
+            }, genBusy ? t('settings.saving') : t('settings.generation.save')),
+            h('button', {
+              type: 'button',
+              className: 'dnr-btn',
+              disabled: genBusy,
+              onClick: function () { saveGeneration(generationPayloadFromDraft(genDefaults || normalizeGeneration(null))); },
+            }, t('settings.generation.reset'))));
+
         var rowNodes = [];
         if (overview !== null) {
           overview.novels.forEach(function (novel) {
@@ -1949,6 +2139,7 @@
             ? h('div', { className: 'dnr-settings-note dnr-settings-dir-saved', role: 'status' }, t('settings.dirSaved'))
             : null,
           styleCard,
+          generationCard,
           status === 'loading' && overview === null
             ? h('div', { className: 'dnr-settings-note' }, t('popup.loading'))
             : null,

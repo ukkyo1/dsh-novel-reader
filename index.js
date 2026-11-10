@@ -23,10 +23,8 @@ const RPC_ENDPOINT = 'novel-reader';
 const STATE_FILE = '.reader-state.json';
 const STATE_VERSION = 1;
 /** 运行中代码的代次标记：写进状态文件，便于确认热重载后真的换成了新代码。 */
-const BUILD_MARKER = '2026-11-10-page-reader-v7';
+const BUILD_MARKER = '2026-11-10-pace-v8';
 const DEFAULT_CHUNK_CHARS = 420;
-const DEFAULT_STREAM_DELAY_MS = 55;
-const DEFAULT_CHAPTER_DELAY_MS = 18;
 const DEFAULT_FIRST_TOKEN_DELAY_MS = 350;
 // 每个流式片段的字数：4 字 + 55ms 左右 ≈ 60-90 字/秒，接近真实模型中文出词速度。
 const DELTA_CHARS = 4;
@@ -83,6 +81,12 @@ const DEFAULT_READING_STYLE = {
   pageMaxWidth: 0,
   fontFamily: '',
 };
+/** 正文出字方式：instant=瞬间、duration=整段用固定秒数、speed=固定字/秒。 */
+const DEFAULT_GENERATION = {
+  mode: 'duration',
+  seconds: 4,
+  charsPerSecond: 200,
+};
 
 /** 固定目录的根：尊重 DSH_HOME，宿主进程一定有。 */
 function dshHome() {
@@ -125,6 +129,16 @@ function sanitizeReadingStyle(input, base) {
   if (input.pageMaxWidth !== undefined) style.pageMaxWidth = clampInt(input.pageMaxWidth, 0, 1400, style.pageMaxWidth);
   if (input.fontFamily !== undefined) style.fontFamily = String(input.fontFamily).trim().slice(0, 80);
   return style;
+}
+
+/** 校验出字速度设置。 */
+function sanitizeGeneration(input, base) {
+  const generation = { ...base };
+  if (!input || typeof input !== 'object') return generation;
+  if (input.mode === 'instant' || input.mode === 'duration' || input.mode === 'speed') generation.mode = input.mode;
+  if (input.seconds !== undefined) generation.seconds = clampFloat(input.seconds, 0.5, 60, generation.seconds);
+  if (input.charsPerSecond !== undefined) generation.charsPerSecond = clampInt(input.charsPerSecond, 10, 5000, generation.charsPerSecond);
+  return generation;
 }
 
 /** 从 text[offset] 起取一段：尽量在段落换行处收尾，长度为 chunkChars 的 1~1.6 倍。 */
@@ -310,9 +324,8 @@ export function apply(ctx, rawConfig) {
   let statePath = path.join(directory, STATE_FILE);
   // 设置页选的目录写在 <DSH_HOME> 下的固定文件里，不跟着小说目录走，换目录后仍能记住。
   const settingsPath = path.join(dshHome(), 'novel-reader.settings.json');
-  const settings = { directory: '', readingStyle: null };
+  const settings = { directory: '', readingStyle: null, generation: null };
   const chunkChars = clampInt(config.chunkChars, 80, 4000, DEFAULT_CHUNK_CHARS);
-  const streamDelayMs = clampInt(config.streamDelayMs, 0, 500, DEFAULT_STREAM_DELAY_MS);
   const firstTokenDelayMs = clampInt(config.firstTokenDelayMs, 0, 3000, DEFAULT_FIRST_TOKEN_DELAY_MS);
   const displayMode = config.display === 'answer' ? 'answer' : DEFAULT_DISPLAY_MODE;
   const summaryTemplate = typeof config.summaryTemplate === 'string' && config.summaryTemplate.trim().length > 0
@@ -321,7 +334,6 @@ export function apply(ctx, rawConfig) {
   // 章节模式：识别 txt 里的章节标题，一条消息读一整章；没有章节标题时自动退回按字数切段。
   const chaptersEnabled = config.chapters !== false;
   const numberedJumpEnabled = config.numberedJump !== false;
-  const chapterDelayMs = clampInt(config.chapterDelayMs, 0, 500, DEFAULT_CHAPTER_DELAY_MS);
   const maxChapterChars = clampInt(config.maxChapterChars, 0, 200000, 0);
   const sessionTitleOverride = typeof config.sessionTitle === 'string' ? config.sessionTitle.trim().slice(0, 80) : '';
   // 阅读排版：config 里的默认值，设置页保存的覆盖值在 settings.readingStyle。
@@ -337,6 +349,15 @@ export function apply(ctx, rawConfig) {
   }, DEFAULT_READING_STYLE);
   function effectiveReadingStyle() {
     return sanitizeReadingStyle(settings.readingStyle, configReadingStyle);
+  }
+  // 出字速度：config 默认值 + 设置页覆盖。
+  const configGeneration = sanitizeGeneration({
+    mode: config.streamMode,
+    seconds: config.streamSeconds,
+    charsPerSecond: config.streamCharsPerSecond,
+  }, DEFAULT_GENERATION);
+  function effectiveGeneration() {
+    return sanitizeGeneration(settings.generation, configGeneration);
   }
   const samplesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'samples');
 
@@ -373,6 +394,9 @@ export function apply(ctx, rawConfig) {
       if (parsed && parsed.readingStyle && typeof parsed.readingStyle === 'object') {
         settings.readingStyle = sanitizeReadingStyle(parsed.readingStyle, DEFAULT_READING_STYLE);
       }
+      if (parsed && parsed.generation && typeof parsed.generation === 'object') {
+        settings.generation = sanitizeGeneration(parsed.generation, DEFAULT_GENERATION);
+      }
     } catch (error) {
       if (error && error.code !== 'ENOENT') {
         ctx.logger?.warn?.(`${PLUGIN_ID}: 读取设置文件失败：${String(error.message || error)}`);
@@ -383,7 +407,12 @@ export function apply(ctx, rawConfig) {
   async function saveSettings() {
     await fsp.mkdir(path.dirname(settingsPath), { recursive: true });
     const temp = `${settingsPath}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    await fsp.writeFile(temp, JSON.stringify({ version: 1, directory: settings.directory, readingStyle: settings.readingStyle }), 'utf8');
+    await fsp.writeFile(temp, JSON.stringify({
+      version: 1,
+      directory: settings.directory,
+      readingStyle: settings.readingStyle,
+      generation: settings.generation,
+    }), 'utf8');
     try {
       await fsp.rename(temp, settingsPath);
     } catch (error) {
@@ -439,6 +468,19 @@ export function apply(ctx, rawConfig) {
     settings.readingStyle = JSON.stringify(next) === JSON.stringify(configReadingStyle) ? null : next;
     await saveSettings();
     return readingStylePayload();
+  }
+
+  /** 当前出字速度 + 配置默认值。 */
+  function generationPayload() {
+    return { ...effectiveGeneration(), defaults: { ...configGeneration } };
+  }
+
+  /** 保存设置页改的出字速度；与默认值一致时清掉覆盖值。 */
+  async function setGeneration(generationPatch) {
+    const next = sanitizeGeneration(generationPatch, effectiveGeneration());
+    settings.generation = JSON.stringify(next) === JSON.stringify(configGeneration) ? null : next;
+    await saveSettings();
+    return generationPayload();
   }
 
   async function loadState() {
@@ -693,19 +735,16 @@ export function apply(ctx, rawConfig) {
 
     let from;
     let end;
-    let delayMs;
     if (chapterMode) {
       const chapter = chapterAt(chapters, start);
       from = Math.min(Math.max(start, chapter.start), chapter.end);
       end = chapter.end;
       // 极端长的章节可以用 maxChapterChars 截成多次；0 表示整章一次读完。
       if (maxChapterChars > 0) end = Math.min(end, from + maxChapterChars);
-      delayMs = chapterDelayMs;
     } else {
       const chunk = takeChunk(text, start, chunkChars);
       from = chunk.start;
       end = chunk.end;
-      delayMs = streamDelayMs;
     }
     if (end <= from) {
       state.progress[meta.id] = total;
@@ -721,11 +760,31 @@ export function apply(ctx, rawConfig) {
       return;
     }
     const thinking = displayMode === 'thinking';
+    const generation = effectiveGeneration();
     const contentIndex = 0;
     const textIndex = thinking ? 1 : 0;
     const deltaType = thinking ? 'reasoning-delta' : 'text-delta';
-    // 真实模型有首字延迟，先停一下再开始出字，观感更像一次正常请求。
-    if (firstTokenDelayMs > 0) await sleep(firstTokenDelayMs, signal);
+    const summary = thinking ? renderSummary(meta, end) : '';
+    // 出字节奏按「正文 + 固定总结」的总片段数计算：duration 模式才真的整条 N 秒。
+    const contentPieces = paragraphs.reduce(
+      (count, paragraph) => count + Math.ceil(paragraph.display.length / DELTA_CHARS),
+      0,
+    ) + Math.max(0, paragraphs.length - 1);
+    const summaryPieces = summary.length > 0 ? Math.ceil(summary.length / DELTA_CHARS) : 0;
+    const totalPieces = Math.max(1, contentPieces + summaryPieces);
+    let pieceDelay = 0;
+    if (generation.mode === 'duration') {
+      pieceDelay = (generation.seconds * 1000) / totalPieces;
+    } else if (generation.mode === 'speed') {
+      pieceDelay = 4000 / generation.charsPerSecond;
+    }
+    const pace = function () {
+      if (pieceDelay <= 0) return Promise.resolve();
+      const jitter = generation.mode === 'speed' ? 0.9 + Math.random() * 0.2 : 1;
+      return sleep(Math.max(1, Math.round(pieceDelay * jitter)), signal);
+    };
+    const firstDelay = generation.mode === 'instant' ? 0 : firstTokenDelayMs;
+    if (firstDelay > 0) await sleep(firstDelay, signal);
     yield { type: 'block-start', index: contentIndex, blockType: thinking ? 'reasoning' : 'text' };
     // 「思考」正文前加一个隐形标记：浏览器半看到它就切换到翻页阅读器；正常模型思考没有这个标记。
     if (thinking) {
@@ -739,16 +798,13 @@ export function apply(ctx, rawConfig) {
         const paragraph = paragraphs[index];
         if (index > 0) {
           yield { type: deltaType, index: contentIndex, text: '\n\n' };
-          await sleep(delayMs, signal);
+          await pace();
         }
         const display = paragraph.display;
         for (let offset = 0; offset < display.length; offset += DELTA_CHARS) {
           if (signal && signal.aborted) throw abortError(signal);
           yield { type: deltaType, index: contentIndex, text: display.slice(offset, offset + DELTA_CHARS) };
-          if (offset + DELTA_CHARS < display.length) {
-            // 轻微抖动，避免输出节奏像机器定时器。
-            await sleep(Math.round(delayMs * (0.75 + Math.random() * 0.5)), signal);
-          }
+          if (offset + DELTA_CHARS < display.length) await pace();
         }
         consumed += paragraph.rawLen;
       }
@@ -766,14 +822,12 @@ export function apply(ctx, rawConfig) {
     };
     // 「思考」里的正文已经完整发出：先把进度落盘，再补固定总结。
     if (thinking) {
-      const summary = renderSummary(meta, end);
-      const summaryDelay = Math.max(8, Math.round(streamDelayMs * 0.3));
       try {
         yield { type: 'block-start', index: textIndex, blockType: 'text' };
         for (let offset = 0; offset < summary.length; offset += DELTA_CHARS) {
           if (signal && signal.aborted) throw abortError(signal);
           yield { type: 'text-delta', index: textIndex, text: summary.slice(offset, offset + DELTA_CHARS) };
-          if (offset + DELTA_CHARS < summary.length) await sleep(summaryDelay, signal);
+          if (offset + DELTA_CHARS < summary.length) await pace();
         }
         yield { type: 'block-end', index: textIndex, block: { type: 'text', text: summary } };
       } catch (error) {
@@ -902,6 +956,12 @@ export function apply(ctx, rawConfig) {
       case 'setStyle': {
         const patch = args && args.style && typeof args.style === 'object' ? args.style : {};
         return setReadingStyle(patch);
+      }
+      case 'generation':
+        return generationPayload();
+      case 'setGeneration': {
+        const patch = args && args.generation && typeof args.generation === 'object' ? args.generation : {};
+        return setGeneration(patch);
       }
       default:
         throw new Error(`未知方法：${String(method)}`);

@@ -48,7 +48,7 @@ function loadPlugin(directory, overrides = {}) {
   const { ctx, state } = makeCtx();
   instances.push(state);
   return import(`${pathToFileURL(pluginFile).href}?v=${Date.now()}-${Math.random()}`).then(async (module) => {
-    module.apply(ctx, { directory, chunkChars: 200, streamDelayMs: 0, firstTokenDelayMs: 0, ...overrides });
+    module.apply(ctx, { directory, chunkChars: 200, streamMode: 'instant', firstTokenDelayMs: 0, ...overrides });
     await new Promise((resolve) => setTimeout(resolve, 120));
     assert.ok(state.routes.length === 1, '应注册 1 条 RPC 路由');
     assert.ok(typeof state.streamListener === 'function', '应注册 llm/stream 监听器');
@@ -432,6 +432,31 @@ try {
   assert.equal(persistedStyle.fontSize, 18, '样式设置持久化');
   await rpcOk(styleReload.state, 'setStyle', { style: styleDefaultsPayload.defaults });
 
+  // ---- 5.10 生成速度 RPC（设置页「生成速度」） -----------------------------
+  const generationDefaults = await rpcOk(first.state, 'generation');
+  assert.equal(generationDefaults.mode, 'instant', '测试配置默认瞬间生成');
+  assert.ok(generationDefaults.defaults && generationDefaults.defaults.mode === 'instant', '返回速度默认值');
+  const generationSpeed = await rpcOk(first.state, 'setGeneration', {
+    generation: { mode: 'speed', charsPerSecond: 123 },
+  });
+  assert.equal(generationSpeed.mode, 'speed');
+  assert.equal(generationSpeed.charsPerSecond, 123);
+  const generationClamped = await rpcOk(first.state, 'setGeneration', {
+    generation: { mode: 'duration', seconds: 0.1, charsPerSecond: 99999 },
+  });
+  assert.equal(generationClamped.mode, 'duration');
+  assert.equal(generationClamped.seconds, 0.5, '秒数越界收敛');
+  assert.equal(generationClamped.charsPerSecond, 5000, '字/秒越界收敛');
+  await rpcOk(first.state, 'setGeneration', { generation: generationDefaults.defaults });
+  const generationReset = await rpcOk(first.state, 'generation');
+  assert.equal(generationReset.mode, 'instant', '恢复默认速度');
+  await rpcOk(first.state, 'setGeneration', { generation: { mode: 'speed', charsPerSecond: 300 } });
+  const generationReload = await loadPlugin(tempDir, { display: 'answer' });
+  const generationPersisted = await rpcOk(generationReload.state, 'generation');
+  assert.equal(generationPersisted.mode, 'speed', '速度设置持久化');
+  assert.equal(generationPersisted.charsPerSecond, 300);
+  await rpcOk(generationReload.state, 'setGeneration', { generation: generationDefaults.defaults });
+
   // ---- 6. 标题 / 压缩 / 非聊天 purpose 分流 --------------------------------
   const titleChunks = await consume(first.state, { ...options, purpose: 'session-title' });
   const defaultTitle = textOf(titleChunks);
@@ -495,7 +520,7 @@ try {
   // select 被清成 null，所以会话不再处于阅读模式，但进度仍在。
   assert.equal(sessionAfterReload.active, false);
 
-  console.log('PASS 宿主半验证：扫描/示例/选书/目录切换与持久化/阅读样式/章节检测与整章阅读/数字跳章/切段/流式/中断续读/标题/压缩/改名/重置/持久化/RPC envelope 全部通过');
+  console.log('PASS 宿主半验证：扫描/示例/选书/目录切换与持久化/阅读样式/生成速度/章节检测与整章阅读/数字跳章/切段/流式/中断续读/标题/压缩/改名/重置/持久化/RPC envelope 全部通过');
 } finally {
   if (previousHome === undefined) delete process.env.DSH_HOME;
   else process.env.DSH_HOME = previousHome;
