@@ -41,7 +41,15 @@ test/*.mjs          宿主半自动化测试（假 ctx 装载 index.js）
 流式 chunk 布局：
 
 - `display: thinking`（默认）：`reasoning` block（正文，逐段流式）→ `text` block（固定总结模板，`summaryTemplate`）。
+  正文的 `reasoning` 文本以隐形标记 `U+2063` 开头（折叠摘要里不可见），浏览器半凭它区分「小说翻页正文」和普通模型思考。
 - `display: answer`：正文直接作为 `text` block。
+
+### 翻页阅读器（浏览器半）
+
+- 仅在会话处于阅读模式时，插件才用 `priority: 50` 占用 `conversation.chat.reasoning.body` 槽位；退出阅读模式立即释放，普通会话的思考仍由官方渲染器负责。
+- 带标记的思考正文会去掉标记和 Markdown 转义，按空行拆成段落，并用一个隐藏的测量节点按当前字号/行距/页高计算每页能放下多少内容；超长段落优先在句号、问号、分号等边界切开。
+- 页面固定高度、`overflow: hidden`，左右两个透明点击区翻页；新页从侧边滑入覆盖旧页（纯 transform 动画，没有滚动）。同一段正文的页码按 `sessionId + 内容指纹` 记在内存里。
+- 排版参数由宿主 `style` RPC 提供：`cordis.patch.yml` 里是默认值，设置页改的覆盖值存到 `<DSH_HOME>/novel-reader.settings.json`，通过 `setStyle` 写回。
 
 细节：
 

@@ -54,6 +54,25 @@
       var POLL_MS = 2000;
       var Z_INDEX = 2147483000; // 高于输入框区域的层叠上下文，避免被裁切/遮挡
       var SAVED_FLASH_MS = 2200;
+      var READING_MARKER = '\u2063';
+      var FLIP_MS = 280;
+      var DEFAULT_READING_STYLE = {
+        fontSize: 15,
+        lineHeight: 1.8,
+        letterSpacing: 0,
+        paragraphSpacing: 0.8,
+        pageHeight: 440,
+        pagePadding: 18,
+        pageMaxWidth: 0,
+        fontFamily: '',
+      };
+      var readingStyleCache = null;
+      var readingStylePending = null;
+      var readingStyleListeners = new Set();
+      var readingPageMemory = new Map();
+      var readingFlipSeq = 0;
+      var readerRpc = null;
+      var readerT = null;
 
       /* ────────────────────────────── 字典 ────────────────────────────── */
 
@@ -92,6 +111,25 @@
         'settings.progress': '已读 {percent}% · {offset} / {chars} 字',
         'settings.error': '操作失败',
         'settings.noSession': '请在会话内使用',
+        'settings.style.title': '阅读样式',
+        'settings.style.fontSize': '字号（px）',
+        'settings.style.lineHeight': '行距（倍）',
+        'settings.style.letterSpacing': '字间距（px）',
+        'settings.style.paragraphSpacing': '段间距（行）',
+        'settings.style.pageHeight': '页高（px）',
+        'settings.style.pagePadding': '页边距（px）',
+        'settings.style.pageMaxWidth': '最大宽度（px，0=自适应）',
+        'settings.style.fontFamily': '字体（CSS font-family，可留空）',
+        'settings.style.save': '保存样式',
+        'settings.style.reset': '恢复默认样式',
+        'settings.style.saved': '样式已保存',
+        'settings.style.hint': '只影响阅读模式下「思考」里的翻页正文；普通模型的思考不受影响。',
+        'reading.page': '第 {index}/{total} 页',
+        'reading.prev': '上一页',
+        'reading.next': '下一页',
+        'reading.zoneHint': '点击页面左侧上一页、右侧下一页',
+        'reading.end': '本章完 · 回复任意消息继续',
+        'reading.generating': '正在生成本章…',
       };
 
       var EN = {
@@ -129,6 +167,25 @@
         'settings.progress': 'Read {percent}% · {offset} / {chars} chars',
         'settings.error': 'Operation failed',
         'settings.noSession': 'Use this inside a session',
+        'settings.style.title': 'Reading style',
+        'settings.style.fontSize': 'Font size (px)',
+        'settings.style.lineHeight': 'Line height (×)',
+        'settings.style.letterSpacing': 'Letter spacing (px)',
+        'settings.style.paragraphSpacing': 'Paragraph spacing (lines)',
+        'settings.style.pageHeight': 'Page height (px)',
+        'settings.style.pagePadding': 'Page padding (px)',
+        'settings.style.pageMaxWidth': 'Max width (px, 0 = auto)',
+        'settings.style.fontFamily': 'Font (CSS font-family, optional)',
+        'settings.style.save': 'Save style',
+        'settings.style.reset': 'Reset style',
+        'settings.style.saved': 'Style saved',
+        'settings.style.hint': 'Affects only the paged excerpt inside the thinking block; normal model reasoning is untouched.',
+        'reading.page': 'Page {index}/{total}',
+        'reading.prev': 'Previous page',
+        'reading.next': 'Next page',
+        'reading.zoneHint': 'Click the left side for the previous page, the right side for the next',
+        'reading.end': 'Chapter end · send any message to continue',
+        'reading.generating': 'Generating this chapter…',
       };
 
       /* ────────────────────────────── 小工具 ────────────────────────────── */
@@ -495,6 +552,23 @@
 }
 .dnr-settings-folder-note--locked { color: var(--dsw-alias-label-secondary, #6b6b6b); }
 .dnr-settings-dir-saved { color: var(--dsw-alias-brand-primary, #3d63e6); }
+.dnr-style-card {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, .22));
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1, transparent);
+}
+.dnr-style-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dnr-style-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px 12px;
+}
+.dnr-style-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dnr-style-field--wide { grid-column: 1 / -1; }
+.dnr-style-label { font-size: 12px; line-height: 1.4; color: var(--dsw-alias-label-secondary, #6b6b6b); }
+.dnr-input--style { width: 100%; box-sizing: border-box; }
 .dnr-settings-list { display: flex; flex-direction: column; gap: 10px; }
 .dnr-settings-note { font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-secondary, #6b6b6b); }
 .dnr-settings-error { font-size: 12px; line-height: 1.55; color: var(--dsw-alias-label-primary, #1f1e1d); }
@@ -550,8 +624,47 @@
   outline: 2px solid var(--dsw-alias-brand-primary, #3d63e6);
   outline-offset: 1px;
 }
+
+/* ── 阅读模式：思考里的翻页阅读器 ── */
+.dnr-reader { position: relative; display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.dnr-reader-box { position: relative; width: 100%; overflow: hidden; border-radius: 10px; }
+.dnr-reader-sheet { position: absolute; top: 0; overflow: hidden; }
+.dnr-reader-sheet p { margin: 0; }
+.dnr-reader-sheet--old { z-index: 1; }
+.dnr-reader-sheet--next {
+  z-index: 2;
+  animation: dnr-flip-next .28s cubic-bezier(.22, .7, .3, 1);
+  box-shadow: -14px 0 28px rgba(0, 0, 0, .16);
+}
+.dnr-reader-sheet--prev {
+  z-index: 2;
+  animation: dnr-flip-prev .28s cubic-bezier(.22, .7, .3, 1);
+  box-shadow: 14px 0 28px rgba(0, 0, 0, .16);
+}
+.dnr-reader-zone {
+  position: absolute; top: 0; bottom: 0; z-index: 3;
+  border: 0; margin: 0; padding: 0; background: transparent; cursor: pointer;
+}
+.dnr-reader-zone--prev { left: 0; width: 28%; cursor: w-resize; }
+.dnr-reader-zone--next { right: 0; width: 72%; cursor: e-resize; }
+.dnr-reader-zone:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #3d63e6);
+  outline-offset: -4px;
+}
+.dnr-reader-measure { position: absolute; top: 0; left: 0; visibility: hidden; pointer-events: none; z-index: -1; }
+.dnr-reader-footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 11px; line-height: 1.5; font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary, #9a9a9a);
+}
+.dnr-reader-footer-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dnr-reader-running { margin-top: 8px; font-size: 11px; color: var(--dsw-alias-label-tertiary, #9a9a9a); }
+@keyframes dnr-flip-next { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes dnr-flip-prev { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+
 @media (prefers-reduced-motion: reduce) {
   .dnr-trigger, .dnr-btn, .dnr-menu-row { transition: none; }
+  .dnr-reader-sheet--next, .dnr-reader-sheet--prev { animation: none; }
 }
 `;
 
@@ -601,6 +714,369 @@
       function guard(Component, props, t) {
         if (PluginErrorBoundary === null) return h(Component, props);
         return h(PluginErrorBoundary, { t: t }, h(Component, props));
+      }
+
+      /* ────────────────────── 阅读模式「思考」翻页阅读 ────────────────────── */
+
+      function normalizeReadingStyle(value) {
+        var source = value && typeof value === 'object' ? value : {};
+        var pick = function (name, fallback, min, max) {
+          var number = Number(source[name]);
+          if (!isFinite(number)) return fallback;
+          return Math.min(max, Math.max(min, number));
+        };
+        return {
+          fontSize: pick('fontSize', DEFAULT_READING_STYLE.fontSize, 12, 40),
+          lineHeight: pick('lineHeight', DEFAULT_READING_STYLE.lineHeight, 1.2, 3),
+          letterSpacing: pick('letterSpacing', DEFAULT_READING_STYLE.letterSpacing, 0, 8),
+          paragraphSpacing: pick('paragraphSpacing', DEFAULT_READING_STYLE.paragraphSpacing, 0, 3),
+          pageHeight: pick('pageHeight', DEFAULT_READING_STYLE.pageHeight, 240, 1200),
+          pagePadding: pick('pagePadding', DEFAULT_READING_STYLE.pagePadding, 0, 64),
+          pageMaxWidth: pick('pageMaxWidth', DEFAULT_READING_STYLE.pageMaxWidth, 0, 1400),
+          fontFamily: typeof source.fontFamily === 'string' ? source.fontFamily.trim() : '',
+        };
+      }
+
+      function fetchReadingStyle(rpc) {
+        if (readingStyleCache !== null) return Promise.resolve(readingStyleCache);
+        if (readingStylePending !== null) return readingStylePending;
+        var pending = invoke(rpc, 'style', {}).then(function (value) {
+          readingStyleCache = normalizeReadingStyle(value);
+          return readingStyleCache;
+        }, function () {
+          readingStyleCache = normalizeReadingStyle(null);
+          return readingStyleCache;
+        });
+        readingStylePending = pending;
+        return pending.then(function (value) {
+          if (readingStylePending === pending) readingStylePending = null;
+          return value;
+        });
+      }
+
+      function invalidateReadingStyle() {
+        readingStyleCache = null;
+        readingStylePending = null;
+        readingStyleListeners.forEach(function (listener) {
+          try { listener(); } catch (error) { /* 忽略 */ }
+        });
+      }
+
+      function subscribeReadingStyle(listener) {
+        readingStyleListeners.add(listener);
+        return function () { readingStyleListeners.delete(listener); };
+      }
+
+      function unescapeReadingMarks(text) {
+        return String(text || '').replace(/\\([\\`*_\[\]<>#|+=~.-])/g, '$1');
+      }
+
+      /** 把思考正文整理成阅读页的段落数组（去掉隐形标记与 Markdown 转义）。 */
+      function readingBlocks(text) {
+        var raw = String(text || '').split(READING_MARKER).join('').replace(/\r\n?/g, '\n');
+        var clean = function (part) {
+          return unescapeReadingMarks(part.replace(/^[ \t\u3000]+/, '').replace(/[ \t\u3000]+$/, ''));
+        };
+        var blocks = raw.split(/\n{2,}/).map(clean).filter(function (part) { return part.length > 0; });
+        if (blocks.length <= 1) {
+          blocks = raw.split(/\n+/).map(clean).filter(function (part) { return part.length > 0; });
+        }
+        return blocks;
+      }
+
+      /** 非小说正文的普通思考：交回官方内容工厂，保持原有渲染。 */
+      function delegateReasoning(props) {
+        if (typeof props.renderFactorySlot === 'function') {
+          try {
+            return props.renderFactorySlot('conversation.chat.reasoning.content', {
+              text: props.text,
+              running: props.running,
+            });
+          } catch (error) { /* 落到纯文本兜底 */ }
+        }
+        return h('div', { style: { whiteSpace: 'pre-wrap' } }, props.text || '');
+      }
+
+      function ReadingReasoningBody(props) {
+        var t = typeof props.t === 'function' ? props.t : (typeof readerT === 'function' ? readerT : function (key) { return String(key); });
+        var rpc = typeof props.rpc === 'function' ? props.rpc : readerRpc;
+        var hasMarker = (typeof props.rawText === 'string' && props.rawText.indexOf(READING_MARKER) !== -1)
+          || (typeof props.text === 'string' && props.text.indexOf(READING_MARKER) !== -1);
+        var styleState = useState(null);
+        var style = styleState[0];
+        var setStyle = styleState[1];
+
+        useEffect(function () {
+          if (!hasMarker) return undefined;
+          var alive = true;
+          var load = function () {
+            if (typeof rpc !== 'function') return;
+            fetchReadingStyle(rpc).then(function (value) {
+              if (alive) setStyle(value);
+            }, function () { /* 用默认样式 */ });
+          };
+          load();
+          var unsubscribe = subscribeReadingStyle(load);
+          return function () {
+            alive = false;
+            unsubscribe();
+          };
+        }, [hasMarker]);
+
+        if (!hasMarker) return delegateReasoning(props);
+        return h(ReadingPageView, {
+          text: props.text,
+          running: props.running === true,
+          style: style || DEFAULT_READING_STYLE,
+          t: t,
+          sessionId: props.sessionId,
+        });
+      }
+
+      function ReadingPageView(props) {
+        var t = typeof props.t === 'function' ? props.t : function (key) { return String(key); };
+        var style = props.style || DEFAULT_READING_STYLE;
+        var blocks = React.useMemo(function () { return readingBlocks(props.text); }, [props.text]);
+        var containerRef = useRef(null);
+        var measureRef = useRef(null);
+        var flipTimer = useRef(null);
+        var memoryKeyRef = useRef('');
+
+        var pagesState = useState([]);
+        var pages = pagesState[0];
+        var setPages = pagesState[1];
+
+        var indexState = useState(0);
+        var pageIndex = indexState[0];
+        var setPageIndex = indexState[1];
+
+        var widthState = useState(0);
+        var width = widthState[0];
+        var setWidth = widthState[1];
+
+        var flipState = useState(null);
+        var flip = flipState[0];
+        var setFlip = flipState[1];
+
+        var styleKey = [
+          style.fontSize, style.lineHeight, style.letterSpacing, style.paragraphSpacing,
+          style.pageHeight, style.pagePadding, style.pageMaxWidth, style.fontFamily,
+        ].join('|');
+        var pagesKey = React.useMemo(function () {
+          var head = blocks.length > 0 ? blocks[0].slice(0, 24) : '';
+          var tail = blocks.length > 0 ? blocks[blocks.length - 1].slice(-24) : '';
+          return blocks.length + '|' + head + '|' + tail;
+        }, [blocks]);
+        var memoryKey = String(props.sessionId || '') + '|' + pagesKey;
+
+        useEffect(function () {
+          var node = containerRef.current;
+          if (!node) return undefined;
+          var update = function () {
+            var next = node.clientWidth || 0;
+            setWidth(function (previous) { return previous === next ? previous : next; });
+          };
+          update();
+          if (typeof ResizeObserver === 'function') {
+            var observer = new ResizeObserver(update);
+            observer.observe(node);
+            return function () { observer.disconnect(); };
+          }
+          window.addEventListener('resize', update);
+          return function () { window.removeEventListener('resize', update); };
+        }, []);
+
+        useEffect(function () {
+          return function () {
+            if (flipTimer.current !== null) {
+              clearTimeout(flipTimer.current);
+              flipTimer.current = null;
+            }
+          };
+        }, []);
+
+        React.useLayoutEffect(function () {
+          if (props.running || blocks.length === 0 || width <= 0) {
+            if (props.running) setPages([]);
+            return;
+          }
+          var measure = measureRef.current;
+          if (!measure) return;
+          var sheetWidth = style.pageMaxWidth > 0 ? Math.min(width, style.pageMaxWidth) : width;
+          var contentWidth = Math.max(80, sheetWidth - style.pagePadding * 2);
+          var capacity = Math.max(60, style.pageHeight - style.pagePadding * 2);
+          measure.style.width = contentWidth + 'px';
+          var gap = Math.round(style.paragraphSpacing * style.fontSize);
+          var heightOf = function (value) {
+            measure.textContent = value;
+            return measure.offsetHeight;
+          };
+          var fitCut = function (value) {
+            var low = 1;
+            var high = value.length;
+            var best = 0;
+            while (low <= high) {
+              var mid = (low + high) >> 1;
+              if (heightOf(value.slice(0, mid)) <= capacity) {
+                best = mid;
+                low = mid + 1;
+              } else {
+                high = mid - 1;
+              }
+            }
+            if (best <= 0) return 0;
+            var floor = Math.max(1, Math.floor(best * 0.72));
+            var sentence = '。！？；…';
+            for (var i = best; i > floor; i -= 1) {
+              if (sentence.indexOf(value.charAt(i - 1)) !== -1) return i;
+            }
+            var clause = '，、,;：';
+            for (var j = best; j > floor; j -= 1) {
+              if (clause.indexOf(value.charAt(j - 1)) !== -1) return j;
+            }
+            return best;
+          };
+          var pageList = [];
+          var current = [];
+          var used = 0;
+          for (var index = 0; index < blocks.length; index += 1) {
+            var remaining = blocks[index];
+            while (remaining.length > 0) {
+              var height = heightOf(remaining) + (current.length > 0 ? gap : 0);
+              if (used + height <= capacity) {
+                current.push(remaining);
+                used += height;
+                remaining = '';
+                continue;
+              }
+              if (current.length > 0) {
+                pageList.push(current);
+                current = [];
+                used = 0;
+                continue;
+              }
+              var cut = fitCut(remaining);
+              if (cut <= 0) cut = Math.max(1, Math.min(remaining.length, Math.floor(remaining.length / 2)));
+              current.push(remaining.slice(0, cut));
+              pageList.push(current);
+              current = [];
+              used = 0;
+              remaining = remaining.slice(cut).replace(/^\s+/, '');
+            }
+          }
+          if (current.length > 0) pageList.push(current);
+          if (pageList.length === 0) pageList.push(['']);
+          setPages(pageList);
+          var remembered = readingPageMemory.get(memoryKey);
+          var sameDocument = memoryKeyRef.current === memoryKey;
+          memoryKeyRef.current = memoryKey;
+          setPageIndex(function (previous) {
+            var next;
+            if (sameDocument) next = remembered === undefined ? previous : remembered;
+            else next = remembered === undefined ? 0 : remembered;
+            return Math.max(0, Math.min(next, pageList.length - 1));
+          });
+        }, [pagesKey, styleKey, width, props.running, memoryKey]);
+
+        useEffect(function () {
+          if (props.running || pages.length === 0) return;
+          readingPageMemory.set(memoryKey, pageIndex);
+          if (readingPageMemory.size > 200) {
+            var first = readingPageMemory.keys().next();
+            if (!first.done) readingPageMemory.delete(first.value);
+          }
+        }, [pageIndex, memoryKey, pages.length, props.running]);
+
+        var goTo = function (next) {
+          var target = Math.max(0, Math.min(next, pages.length - 1));
+          if (target === pageIndex || pages.length === 0) return;
+          if (flipTimer.current !== null) {
+            clearTimeout(flipTimer.current);
+            flipTimer.current = null;
+          }
+          setFlip({ from: pageIndex, dir: target > pageIndex ? 1 : -1 });
+          setPageIndex(target);
+          readingFlipSeq += 1;
+          flipTimer.current = setTimeout(function () {
+            flipTimer.current = null;
+            setFlip(null);
+          }, FLIP_MS + 80);
+        };
+
+        var gapPx = Math.round(style.paragraphSpacing * style.fontSize);
+        var typography = {
+          fontSize: style.fontSize + 'px',
+          lineHeight: style.lineHeight,
+          letterSpacing: style.letterSpacing + 'px',
+          fontFamily: style.fontFamily || undefined,
+          color: 'var(--dsw-alias-label-primary, #1f1e1d)',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          overflowWrap: 'anywhere',
+        };
+        var sheetWidth = style.pageMaxWidth > 0 && width > 0 ? Math.min(width, style.pageMaxWidth) : width;
+        var sheetLeft = width > 0 ? Math.max(0, Math.round((width - sheetWidth) / 2)) : 0;
+        var sheetStyle = {
+          position: 'absolute',
+          top: 0,
+          left: sheetLeft + 'px',
+          width: sheetWidth > 0 ? sheetWidth + 'px' : '100%',
+          height: style.pageHeight + 'px',
+          boxSizing: 'border-box',
+          padding: style.pagePadding + 'px',
+          overflow: 'hidden',
+          background: 'var(--dsw-alias-bg-base, #ffffff)',
+        };
+        var renderSheet = function (list, className) {
+          var content = (list || []).map(function (block, index) {
+            return h('p', {
+              key: index,
+              style: { margin: index === list.length - 1 ? 0 : '0 0 ' + gapPx + 'px' },
+            }, block);
+          });
+          return h('div', { className: 'dnr-reader-sheet ' + className, style: sheetStyle },
+            h('div', { style: typography }, content));
+        };
+
+        var runningText = unescapeReadingMarks(String(props.text || '').split(READING_MARKER).join('').trim());
+        var runningStyle = {
+          position: 'relative',
+          width: '100%',
+          minHeight: '60px',
+          boxSizing: 'border-box',
+          padding: style.pagePadding + 'px',
+          background: 'var(--dsw-alias-bg-base, #ffffff)',
+        };
+        return h('div', { className: 'dnr-reader', ref: containerRef },
+          StyleTag(),
+          props.running
+            ? h('div', { className: 'dnr-reader-sheet', style: runningStyle },
+              h('div', { style: typography }, runningText),
+              h('div', { className: 'dnr-reader-running' }, t('reading.generating')))
+            : h('div', { className: 'dnr-reader-box', style: { position: 'relative', height: style.pageHeight + 'px', width: '100%' } },
+              flip !== null && pages[flip.from] !== undefined
+                ? renderSheet(pages[flip.from], 'dnr-reader-sheet--old')
+                : null,
+              renderSheet(pages[pageIndex] || [], flip === null ? '' : (flip.dir > 0 ? 'dnr-reader-sheet--next' : 'dnr-reader-sheet--prev')),
+              h('button', {
+                type: 'button',
+                className: 'dnr-reader-zone dnr-reader-zone--prev',
+                'aria-label': t('reading.prev'),
+                onClick: function () { goTo(pageIndex - 1); },
+              }),
+              h('button', {
+                type: 'button',
+                className: 'dnr-reader-zone dnr-reader-zone--next',
+                'aria-label': t('reading.next'),
+                onClick: function () { goTo(pageIndex + 1); },
+              })
+            ),
+          h('div', { className: 'dnr-reader-measure', ref: measureRef, style: typography }),
+          h('div', { className: 'dnr-reader-footer' },
+            h('span', null, pages.length > 0 ? t('reading.page', { index: pageIndex + 1, total: pages.length }) : ''),
+            h('span', { className: 'dnr-reader-footer-hint' },
+              pages.length > 0 && pageIndex < pages.length - 1 ? t('reading.zoneHint') : t('reading.end')))
+        );
       }
 
       /* ────────────────────────────── 触发按钮 + 弹层 ────────────────────────────── */
@@ -682,6 +1158,14 @@
             clearInterval(timer);
           };
         }, [sessionId, fetchSession]);
+
+        // 阅读模式开启时临时接管「思考」正文（翻页阅读器）；退出时交还官方渲染。
+        useEffect(function () {
+          var active = session !== null && session.active === true;
+          if (!active || typeof props.setReasoningBodyActive !== 'function') return undefined;
+          props.setReasoningBodyActive(true);
+          return function () { props.setReasoningBodyActive(false); };
+        }, [session !== null && session.active === true]);
 
         // 打开时拉小说列表（每次打开都刷新，避免吃到旧目录）。
         useEffect(function () {
@@ -1001,10 +1485,27 @@
         var dirNoticed = dirNoticedState[0];
         var setDirNoticed = dirNoticedState[1];
 
+        var styleDraftState = useState(null);
+        var styleDraft = styleDraftState[0];
+        var setStyleDraft = styleDraftState[1];
+
+        var styleDefaultsState = useState(null);
+        var styleDefaults = styleDefaultsState[0];
+        var setStyleDefaults = styleDefaultsState[1];
+
+        var styleBusyState = useState(false);
+        var styleBusy = styleBusyState[0];
+        var setStyleBusy = styleBusyState[1];
+
+        var styleNoticedState = useState(false);
+        var styleNoticed = styleNoticedState[0];
+        var setStyleNoticed = styleNoticedState[1];
+
         var aliveRef = useRef(true);
         var requestSeq = useRef(0);
         var savedTimer = useRef(null);
         var dirTimer = useRef(null);
+        var styleTimer = useRef(null);
 
         useEffect(function () {
           aliveRef.current = true;
@@ -1018,7 +1519,22 @@
               clearTimeout(dirTimer.current);
               dirTimer.current = null;
             }
+            if (styleTimer.current !== null) {
+              clearTimeout(styleTimer.current);
+              styleTimer.current = null;
+            }
           };
+        }, []);
+
+        useEffect(function () {
+          invoke(rpcRef.current, 'style', {}).then(function (value) {
+            if (!aliveRef.current) return;
+            var normalized = normalizeReadingStyle(value);
+            setStyleDraft(normalized);
+            setStyleDefaults(value && value.defaults ? normalizeReadingStyle(value.defaults) : normalizeReadingStyle(null));
+          }, function () {
+            if (aliveRef.current) setStyleDraft(normalizeReadingStyle(null));
+          });
         }, []);
 
         // method 区分：进页面用 'overview'，按钮“刷新列表”用 'refresh'（重新扫描目录）。
@@ -1077,6 +1593,103 @@
             return merged;
           });
         };
+
+        var editStyleField = function (name, raw) {
+          setStyleDraft(function (previous) {
+            var next = Object.assign({}, previous || DEFAULT_READING_STYLE);
+            next[name] = raw;
+            return next;
+          });
+          setStyleNoticed(false);
+        };
+
+        var stylePayloadFromDraft = function (draft) {
+          var source = draft || {};
+          var payload = {};
+          ['fontSize', 'lineHeight', 'letterSpacing', 'paragraphSpacing', 'pageHeight', 'pagePadding', 'pageMaxWidth'].forEach(function (name) {
+            var number = Number(source[name]);
+            if (isFinite(number)) payload[name] = number;
+          });
+          payload.fontFamily = typeof source.fontFamily === 'string' ? source.fontFamily : '';
+          return payload;
+        };
+
+        var saveReadingStyle = function (payload) {
+          if (styleBusy) return;
+          setStyleBusy(true);
+          setError('');
+          setStyleNoticed(false);
+          invoke(rpcRef.current, 'setStyle', { style: payload }).then(function (value) {
+            if (!aliveRef.current) return;
+            setStyleDraft(normalizeReadingStyle(value));
+            setStyleDefaults(value && value.defaults ? normalizeReadingStyle(value.defaults) : normalizeReadingStyle(null));
+            invalidateReadingStyle();
+            setStyleNoticed(true);
+            if (styleTimer.current !== null) clearTimeout(styleTimer.current);
+            styleTimer.current = setTimeout(function () {
+              styleTimer.current = null;
+              if (aliveRef.current) setStyleNoticed(false);
+            }, SAVED_FLASH_MS);
+          }, function (failure) {
+            if (!aliveRef.current) return;
+            setError(errorText(failure));
+          }).then(function () {
+            if (!aliveRef.current) return;
+            setStyleBusy(false);
+          });
+        };
+
+        var styleFields = [
+          ['fontSize', 'number', '1'],
+          ['lineHeight', 'number', '0.05'],
+          ['letterSpacing', 'number', '0.5'],
+          ['paragraphSpacing', 'number', '0.1'],
+          ['pageHeight', 'number', '10'],
+          ['pagePadding', 'number', '1'],
+          ['pageMaxWidth', 'number', '10'],
+        ];
+        var styleFieldNodes = styleFields.map(function (entry) {
+          var key = entry[0];
+          var value = styleDraft ? styleDraft[key] : '';
+          return h('label', { key: key, className: 'dnr-style-field' },
+            h('span', { className: 'dnr-style-label' }, t('settings.style.' + key)),
+            h('input', {
+              className: 'dnr-input dnr-input--style',
+              type: entry[1],
+              step: entry[2],
+              value: value === undefined || value === null ? '' : String(value),
+              onChange: function (event) { editStyleField(key, event.target.value); },
+            }));
+        });
+        styleFieldNodes.push(h('label', { key: 'fontFamily', className: 'dnr-style-field dnr-style-field--wide' },
+          h('span', { className: 'dnr-style-label' }, t('settings.style.fontFamily')),
+          h('input', {
+            className: 'dnr-input dnr-input--style',
+            type: 'text',
+            value: styleDraft && typeof styleDraft.fontFamily === 'string' ? styleDraft.fontFamily : '',
+            onChange: function (event) { editStyleField('fontFamily', event.target.value); },
+          })));
+        var styleCard = h('div', { className: 'dnr-style-card' },
+          h('div', { className: 'dnr-style-head' },
+            h('div', { className: 'dnr-settings-title' }, t('settings.style.title')),
+            styleNoticed ? h('span', { className: 'dnr-novel-saved' }, t('settings.style.saved')) : null),
+          h('p', { className: 'dnr-settings-folder-note' }, t('settings.style.hint')),
+          h('div', { className: 'dnr-style-grid' }, styleFieldNodes),
+          h('div', { className: 'dnr-settings-toolbar' },
+            h('button', {
+              type: 'button',
+              className: 'dnr-btn',
+              disabled: styleBusy,
+              onClick: function () { saveReadingStyle(stylePayloadFromDraft(styleDraft)); },
+            }, styleBusy ? t('settings.saving') : t('settings.style.save')),
+            h('button', {
+              type: 'button',
+              className: 'dnr-btn',
+              disabled: styleBusy,
+              onClick: function () {
+                saveReadingStyle(stylePayloadFromDraft(styleDefaults || normalizeReadingStyle(null)));
+              },
+            }, t('settings.style.reset'))));
 
         var saveName = function (novel) {
           if (busy !== '') return;
@@ -1314,6 +1927,7 @@
           dirNoticed
             ? h('div', { className: 'dnr-settings-note dnr-settings-dir-saved', role: 'status' }, t('settings.dirSaved'))
             : null,
+          styleCard,
           status === 'loading' && overview === null
             ? h('div', { className: 'dnr-settings-note' }, t('popup.loading'))
             : null,
@@ -1362,6 +1976,52 @@
         var t = makeTranslate(bound);
         var rpc = makeRpc(ctx);
         var pickDirectory = makeDirectoryPicker(ctx);
+        readerRpc = rpc;
+        readerT = t;
+
+        // 「思考」正文的临时接管：只有阅读模式被打开时才占用这个槽位，退出即交还官方渲染。
+        var reasoningBodyStop = null;
+        var reasoningBodyUsers = 0;
+        function stopReasoningBody() {
+          if (reasoningBodyStop !== null) {
+            try { reasoningBodyStop(); } catch (error) { /* 忽略 */ }
+            reasoningBodyStop = null;
+          }
+        }
+        function startReasoningBody() {
+          if (reasoningBodyStop !== null) return;
+          try {
+            reasoningBodyStop = ctx.slots.inject('conversation.chat.reasoning.body', function () {
+              return ctx.slots.register({
+                name: 'conversation.chat.reasoning.body',
+                priority: 50,
+                locale: NS,
+              }, function (slotProps) {
+                return guard(ReadingReasoningBody, slotProps, t);
+              });
+            });
+          } catch (failure) {
+            reasoningBodyStop = null;
+            try { console.warn('[novel-reader] reasoning body registration failed:', failure); } catch (ignored) { /* 忽略 */ }
+          }
+        }
+        function setReasoningBodyActive(active) {
+          if (active) {
+            reasoningBodyUsers += 1;
+            if (reasoningBodyUsers === 1) startReasoningBody();
+          } else {
+            reasoningBodyUsers = Math.max(0, reasoningBodyUsers - 1);
+            if (reasoningBodyUsers === 0) stopReasoningBody();
+          }
+        }
+        if (typeof ctx.effect === 'function') {
+          ctx.effect(function () {
+            return function () {
+              reasoningBodyUsers = 0;
+              stopReasoningBody();
+            };
+          }, 'novel-reader: release reasoning body override');
+        }
 
         try {
           ctx.slots.inject('conversation.input.right', function () {
@@ -1371,7 +2031,12 @@
               order: 900,
               locale: NS,
               inject: function (sessionId) {
-                return { sessionId: sessionId, t: t, rpc: rpc };
+                return {
+                  sessionId: sessionId,
+                  t: t,
+                  rpc: rpc,
+                  setReasoningBodyActive: setReasoningBodyActive,
+                };
               },
             }, function (slotProps) {
               return guard(NovelTrigger, slotProps, t);

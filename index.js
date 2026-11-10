@@ -23,7 +23,7 @@ const RPC_ENDPOINT = 'novel-reader';
 const STATE_FILE = '.reader-state.json';
 const STATE_VERSION = 1;
 /** 运行中代码的代次标记：写进状态文件，便于确认热重载后真的换成了新代码。 */
-const BUILD_MARKER = '2026-11-09-portable-dir-v6';
+const BUILD_MARKER = '2026-11-10-page-reader-v7';
 const DEFAULT_CHUNK_CHARS = 420;
 const DEFAULT_STREAM_DELAY_MS = 55;
 const DEFAULT_CHAPTER_DELAY_MS = 18;
@@ -70,6 +70,20 @@ const DEFAULT_SUMMARY_TEMPLATE = [
   '需要我继续处理下一部分时直接回复；想先停在这里也可以，随时可以接着往下做。',
 ].join('\n');
 
+/** 「思考」正文开头的隐形标记：浏览器半看到它就切换成翻页阅读器，正常模型思考没有这个标记。 */
+const READING_MARKER = '\u2063';
+/** 阅读页面的默认排版；cordis.patch.yml 和设置页都可以覆盖。 */
+const DEFAULT_READING_STYLE = {
+  fontSize: 15,
+  lineHeight: 1.8,
+  letterSpacing: 0,
+  paragraphSpacing: 0.8,
+  pageHeight: 440,
+  pagePadding: 18,
+  pageMaxWidth: 0,
+  fontFamily: '',
+};
+
 /** 固定目录的根：尊重 DSH_HOME，宿主进程一定有。 */
 function dshHome() {
   return process.env.DSH_HOME && process.env.DSH_HOME.length > 0
@@ -90,6 +104,27 @@ function clampInt(value, min, max, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.min(max, Math.max(min, Math.trunc(number)));
+}
+
+function clampFloat(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+/** 合并并校验阅读样式；未知字段忽略，越界值收敛到合法范围。 */
+function sanitizeReadingStyle(input, base) {
+  const style = { ...base };
+  if (!input || typeof input !== 'object') return style;
+  if (input.fontSize !== undefined) style.fontSize = clampInt(input.fontSize, 12, 40, style.fontSize);
+  if (input.lineHeight !== undefined) style.lineHeight = clampFloat(input.lineHeight, 1.2, 3, style.lineHeight);
+  if (input.letterSpacing !== undefined) style.letterSpacing = clampFloat(input.letterSpacing, 0, 8, style.letterSpacing);
+  if (input.paragraphSpacing !== undefined) style.paragraphSpacing = clampFloat(input.paragraphSpacing, 0, 3, style.paragraphSpacing);
+  if (input.pageHeight !== undefined) style.pageHeight = clampInt(input.pageHeight, 240, 1200, style.pageHeight);
+  if (input.pagePadding !== undefined) style.pagePadding = clampInt(input.pagePadding, 0, 64, style.pagePadding);
+  if (input.pageMaxWidth !== undefined) style.pageMaxWidth = clampInt(input.pageMaxWidth, 0, 1400, style.pageMaxWidth);
+  if (input.fontFamily !== undefined) style.fontFamily = String(input.fontFamily).trim().slice(0, 80);
+  return style;
 }
 
 /** 从 text[offset] 起取一段：尽量在段落换行处收尾，长度为 chunkChars 的 1~1.6 倍。 */
@@ -275,7 +310,7 @@ export function apply(ctx, rawConfig) {
   let statePath = path.join(directory, STATE_FILE);
   // 设置页选的目录写在 <DSH_HOME> 下的固定文件里，不跟着小说目录走，换目录后仍能记住。
   const settingsPath = path.join(dshHome(), 'novel-reader.settings.json');
-  const settings = { directory: '' };
+  const settings = { directory: '', readingStyle: null };
   const chunkChars = clampInt(config.chunkChars, 80, 4000, DEFAULT_CHUNK_CHARS);
   const streamDelayMs = clampInt(config.streamDelayMs, 0, 500, DEFAULT_STREAM_DELAY_MS);
   const firstTokenDelayMs = clampInt(config.firstTokenDelayMs, 0, 3000, DEFAULT_FIRST_TOKEN_DELAY_MS);
@@ -289,6 +324,20 @@ export function apply(ctx, rawConfig) {
   const chapterDelayMs = clampInt(config.chapterDelayMs, 0, 500, DEFAULT_CHAPTER_DELAY_MS);
   const maxChapterChars = clampInt(config.maxChapterChars, 0, 200000, 0);
   const sessionTitleOverride = typeof config.sessionTitle === 'string' ? config.sessionTitle.trim().slice(0, 80) : '';
+  // 阅读排版：config 里的默认值，设置页保存的覆盖值在 settings.readingStyle。
+  const configReadingStyle = sanitizeReadingStyle({
+    fontSize: config.readingFontSize,
+    lineHeight: config.readingLineHeight,
+    letterSpacing: config.readingLetterSpacing,
+    paragraphSpacing: config.readingParagraphSpacing,
+    pageHeight: config.readingPageHeight,
+    pagePadding: config.readingPagePadding,
+    pageMaxWidth: config.readingPageMaxWidth,
+    fontFamily: config.readingFontFamily,
+  }, DEFAULT_READING_STYLE);
+  function effectiveReadingStyle() {
+    return sanitizeReadingStyle(settings.readingStyle, configReadingStyle);
+  }
   const samplesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'samples');
 
   /** 持久状态：显示名 / 每本进度 / 会话→小说。 */
@@ -321,6 +370,9 @@ export function apply(ctx, rawConfig) {
       if (parsed && typeof parsed.directory === 'string' && parsed.directory.trim().length > 0) {
         settings.directory = parsed.directory.trim();
       }
+      if (parsed && parsed.readingStyle && typeof parsed.readingStyle === 'object') {
+        settings.readingStyle = sanitizeReadingStyle(parsed.readingStyle, DEFAULT_READING_STYLE);
+      }
     } catch (error) {
       if (error && error.code !== 'ENOENT') {
         ctx.logger?.warn?.(`${PLUGIN_ID}: 读取设置文件失败：${String(error.message || error)}`);
@@ -331,7 +383,7 @@ export function apply(ctx, rawConfig) {
   async function saveSettings() {
     await fsp.mkdir(path.dirname(settingsPath), { recursive: true });
     const temp = `${settingsPath}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    await fsp.writeFile(temp, JSON.stringify({ version: 1, directory: settings.directory }), 'utf8');
+    await fsp.writeFile(temp, JSON.stringify({ version: 1, directory: settings.directory, readingStyle: settings.readingStyle }), 'utf8');
     try {
       await fsp.rename(temp, settingsPath);
     } catch (error) {
@@ -374,6 +426,19 @@ export function apply(ctx, rawConfig) {
     await loadState();
     await refreshCatalog();
     return overview();
+  }
+
+  /** 当前生效的阅读排版 + 配置默认值（设置页「恢复默认」用）。 */
+  function readingStylePayload() {
+    return { ...effectiveReadingStyle(), defaults: { ...configReadingStyle } };
+  }
+
+  /** 保存设置页改的阅读排版；与默认值一致时清掉覆盖值。 */
+  async function setReadingStyle(stylePatch) {
+    const next = sanitizeReadingStyle(stylePatch, effectiveReadingStyle());
+    settings.readingStyle = JSON.stringify(next) === JSON.stringify(configReadingStyle) ? null : next;
+    await saveSettings();
+    return readingStylePayload();
   }
 
   async function loadState() {
@@ -662,6 +727,10 @@ export function apply(ctx, rawConfig) {
     // 真实模型有首字延迟，先停一下再开始出字，观感更像一次正常请求。
     if (firstTokenDelayMs > 0) await sleep(firstTokenDelayMs, signal);
     yield { type: 'block-start', index: contentIndex, blockType: thinking ? 'reasoning' : 'text' };
+    // 「思考」正文前加一个隐形标记：浏览器半看到它就切换到翻页阅读器；正常模型思考没有这个标记。
+    if (thinking) {
+      yield { type: 'reasoning-delta', index: contentIndex, text: `${READING_MARKER}\n\n` };
+    }
     // 中断时只回退到最后一个完整自然段，避免把半段文字算作已读。
     let consumed = 0;
     try {
@@ -689,10 +758,11 @@ export function apply(ctx, rawConfig) {
       throw error;
     }
     const displayText = paragraphs.map((paragraph) => paragraph.display).join('\n\n');
+    const reasoningText = thinking ? `${READING_MARKER}\n\n${displayText}` : displayText;
     yield {
       type: 'block-end',
       index: contentIndex,
-      block: thinking ? { type: 'reasoning', text: displayText } : { type: 'text', text: displayText },
+      block: thinking ? { type: 'reasoning', text: reasoningText } : { type: 'text', text: reasoningText },
     };
     // 「思考」里的正文已经完整发出：先把进度落盘，再补固定总结。
     if (thinking) {
@@ -827,6 +897,12 @@ export function apply(ctx, rawConfig) {
         return seedDemo();
       case 'setDirectory':
         return setDirectory(args && args.directory);
+      case 'style':
+        return readingStylePayload();
+      case 'setStyle': {
+        const patch = args && args.style && typeof args.style === 'object' ? args.style : {};
+        return setReadingStyle(patch);
+      }
       default:
         throw new Error(`未知方法：${String(method)}`);
     }

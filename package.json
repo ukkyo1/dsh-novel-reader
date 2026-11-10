@@ -1,6 +1,6 @@
 {
   "name": "dsh-novel-reader",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Read local txt novels through the chat dialog: pick a novel beside the model selector, one message reads one chapter, and progress is remembered.",
   "license": "MIT",
   "author": "ukkyo1",
@@ -42,7 +42,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "test": "node test/host-harness.mjs",
+    "test": "node test/host-harness.mjs && node test/client-smoke.mjs",
     "check": "node --check index.js && node --check client.js"
   },
   "dsh": {

@@ -8,6 +8,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const pluginFile = fileURLToPath(new URL('../index.js', import.meta.url));
 const tempDir = await mkdtemp(path.join(os.tmpdir(), 'novel-reader-test-'));
+// 所有设置/状态都落在假 DSH_HOME 下，绝不碰用户真实目录。
+const fakeHome = path.join(tempDir, 'fake-home');
+await mkdir(fakeHome, { recursive: true });
+const previousHome = process.env.DSH_HOME;
+process.env.DSH_HOME = fakeHome;
 
 function makeCtx() {
   const state = { routes: [], streamListener: null, effects: [] };
@@ -263,10 +268,12 @@ try {
   const thinkingChunks = await consume(thinkingPlugin.state, { ...options, sessionId: thinkingSession });
   const reasoningStart = thinkingChunks.find((chunk) => chunk.type === 'block-start' && chunk.blockType === 'reasoning');
   assert.ok(reasoningStart, '思考块存在');
-  const reasoningText = thinkingChunks.filter((chunk) => chunk.type === 'reasoning-delta').map((chunk) => chunk.text).join('');
+  const reasoningRaw = thinkingChunks.filter((chunk) => chunk.type === 'reasoning-delta').map((chunk) => chunk.text).join('');
   const reasoningEnd = thinkingChunks.find((chunk) => chunk.type === 'block-end' && chunk.block && chunk.block.type === 'reasoning');
   assert.ok(reasoningEnd, '思考块有 block-end');
-  assert.equal(reasoningEnd.block.text, reasoningText, '思考块内容 = delta 拼接');
+  assert.equal(reasoningEnd.block.text, reasoningRaw, '思考块内容 = delta 拼接');
+  assert.ok(reasoningRaw.startsWith('\u2063'), '阅读模式思考正文带隐形翻页标记');
+  const reasoningText = reasoningRaw.split('\u2063').join('').trim();
   const reasoningParagraphs = assertChatLike(reasoningText);
   assertParagraphsFromSource(reasoningParagraphs, await readFile(path.join(tempDir, novel.file), 'utf8'));
   const textStart = thinkingChunks.find((chunk) => chunk.type === 'block-start' && chunk.blockType === 'text');
@@ -361,11 +368,7 @@ try {
   await rpcOk(first.state, 'select', { sessionId: hazardSession, novelId: null });
 
   // ---- 5.8 目录可修改（设置页） -------------------------------------------
-  const fakeHome = path.join(tempDir, 'fake-home');
-  await mkdir(fakeHome, { recursive: true });
-  const previousHome = process.env.DSH_HOME;
-  process.env.DSH_HOME = fakeHome;
-  try {
+  {
     const dirPlugin = await loadPlugin(undefined, { display: 'answer', chapterDelayMs: 0 });
     const initialOverview = await rpcOk(dirPlugin.state, 'overview');
     assert.equal(initialOverview.directory, path.join(fakeHome, 'novels'), '默认目录跟随 DSH_HOME');
@@ -391,10 +394,43 @@ try {
     const lockedResult = await rpc(lockedPlugin.state, 'setDirectory', { directory: libraryA });
     assert.equal(lockedResult.ok, false, '配置固定目录时拒绝修改');
     assert.ok(lockedResult.error.message.includes('固定'), '固定目录给出原因');
-  } finally {
-    if (previousHome === undefined) delete process.env.DSH_HOME;
-    else process.env.DSH_HOME = previousHome;
   }
+
+  // ---- 5.9 阅读样式 RPC（设置页「阅读样式」） ------------------------------
+  const styleDefaultsPayload = await rpcOk(first.state, 'style');
+  assert.equal(styleDefaultsPayload.fontSize, 15, '默认字号');
+  assert.equal(styleDefaultsPayload.pageHeight, 440, '默认页高');
+  assert.equal(styleDefaultsPayload.lineHeight, 1.8, '默认行距');
+  assert.ok(styleDefaultsPayload.defaults && styleDefaultsPayload.defaults.fontSize === 15, '返回配置默认值');
+  const styled = await rpcOk(first.state, 'setStyle', {
+    style: {
+      fontSize: 19,
+      lineHeight: 2.1,
+      letterSpacing: 1,
+      paragraphSpacing: 1.2,
+      pageHeight: 520,
+      pagePadding: 22,
+      pageMaxWidth: 720,
+      fontFamily: '"Noto Serif SC", serif',
+    },
+  });
+  assert.equal(styled.fontSize, 19);
+  assert.equal(styled.pageHeight, 520);
+  assert.equal(styled.lineHeight, 2.1);
+  assert.equal(styled.pageMaxWidth, 720);
+  assert.equal(styled.fontFamily, '"Noto Serif SC", serif');
+  const clampedStyle = await rpcOk(first.state, 'setStyle', { style: { fontSize: 99, pageHeight: 10, lineHeight: 0.1 } });
+  assert.equal(clampedStyle.fontSize, 40, '字号越界收敛');
+  assert.equal(clampedStyle.pageHeight, 240, '页高越界收敛');
+  assert.equal(clampedStyle.lineHeight, 1.2, '行距越界收敛');
+  await rpcOk(first.state, 'setStyle', { style: styleDefaultsPayload.defaults });
+  const resetStyle = await rpcOk(first.state, 'style');
+  assert.equal(resetStyle.fontSize, 15, '恢复默认样式');
+  await rpcOk(first.state, 'setStyle', { style: { fontSize: 18 } });
+  const styleReload = await loadPlugin(tempDir, { display: 'answer', chapterDelayMs: 0 });
+  const persistedStyle = await rpcOk(styleReload.state, 'style');
+  assert.equal(persistedStyle.fontSize, 18, '样式设置持久化');
+  await rpcOk(styleReload.state, 'setStyle', { style: styleDefaultsPayload.defaults });
 
   // ---- 6. 标题 / 压缩 / 非聊天 purpose 分流 --------------------------------
   const titleChunks = await consume(first.state, { ...options, purpose: 'session-title' });
@@ -459,8 +495,10 @@ try {
   // select 被清成 null，所以会话不再处于阅读模式，但进度仍在。
   assert.equal(sessionAfterReload.active, false);
 
-  console.log('PASS 宿主半验证：扫描/示例/选书/目录切换与持久化/章节检测与整章阅读/数字跳章/切段/流式/中断续读/标题/压缩/改名/重置/持久化/RPC envelope 全部通过');
+  console.log('PASS 宿主半验证：扫描/示例/选书/目录切换与持久化/阅读样式/章节检测与整章阅读/数字跳章/切段/流式/中断续读/标题/压缩/改名/重置/持久化/RPC envelope 全部通过');
 } finally {
+  if (previousHome === undefined) delete process.env.DSH_HOME;
+  else process.env.DSH_HOME = previousHome;
   for (const state of instances) {
     for (const disposer of state.effects) {
       if (typeof disposer === 'function') {

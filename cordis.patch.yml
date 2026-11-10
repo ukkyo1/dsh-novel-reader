@@ -22,6 +22,15 @@
         maxChapterChars: 0
         # 会话标题；留空用内置的普通工作型标题池（不会出现书名）
         sessionTitle: ""
+        # 阅读页面排版默认值（设置页还能再覆盖）
+        readingFontSize: 15
+        readingLineHeight: 1.8
+        readingLetterSpacing: 0
+        readingParagraphSpacing: 0.8
+        readingPageHeight: 440
+        readingPagePadding: 18
+        readingPageMaxWidth: 0
+        readingFontFamily: ""
         # 小说目录；留空 = <DSH_HOME>/novels。留空时可以在「设置 → 小说阅读」里直接改目录；
         # 填了绝对路径则目录被配置固定，设置页只能看不能改。
         directory: ""
