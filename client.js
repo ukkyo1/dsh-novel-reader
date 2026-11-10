@@ -663,7 +663,9 @@
   font-size: 11px; line-height: 1.5; font-variant-numeric: tabular-nums;
   color: var(--dsw-alias-label-tertiary, #9a9a9a);
 }
-.dnr-reader-footer-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dnr-reader-footer-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+.dnr-reader-nav { flex: 0 0 auto; height: 24px; padding: 0 8px; font-size: 11px; }
+.dnr-reader-pageinfo { flex: 1 1 auto; text-align: center; }
 .dnr-reader-running { margin-top: 8px; font-size: 11px; color: var(--dsw-alias-label-tertiary, #9a9a9a); }
 @keyframes dnr-flip-next { from { transform: translateX(100%); } to { transform: translateX(0); } }
 @keyframes dnr-flip-prev { from { transform: translateX(-100%); } to { transform: translateX(0); } }
@@ -1079,9 +1081,22 @@
             ),
           h('div', { className: 'dnr-reader-measure', ref: measureRef, style: typography }),
           h('div', { className: 'dnr-reader-footer' },
-            h('span', null, pages.length > 0 ? t('reading.page', { index: pageIndex + 1, total: pages.length }) : ''),
-            h('span', { className: 'dnr-reader-footer-hint' },
-              pages.length > 0 && pageIndex < pages.length - 1 ? t('reading.zoneHint') : t('reading.end')))
+            h('button', {
+              type: 'button',
+              className: 'dnr-btn dnr-reader-nav',
+              disabled: pages.length === 0 || pageIndex <= 0,
+              onClick: function () { goTo(pageIndex - 1); },
+            }, '‹ ' + t('reading.prev')),
+            h('span', { className: 'dnr-reader-pageinfo' },
+              pages.length > 0 ? t('reading.page', { index: pageIndex + 1, total: pages.length }) : ''),
+            h('button', {
+              type: 'button',
+              className: 'dnr-btn dnr-reader-nav',
+              disabled: pages.length === 0 || pageIndex >= pages.length - 1,
+              onClick: function () { goTo(pageIndex + 1); },
+            }, t('reading.next') + ' ›')),
+          h('div', { className: 'dnr-reader-footer-hint' },
+            pages.length > 0 && pageIndex < pages.length - 1 ? t('reading.zoneHint') : t('reading.end'))
         );
       }
 
