@@ -6,6 +6,12 @@
 
 适合在地铁、睡前这种「只想往下读一点」的场景：不用切窗口，不用找滚动位置，进度会自动记住。
 
+## 示例
+<img width="1333" height="974" alt="image" src="https://github.com/user-attachments/assets/c609ef15-1f6a-4dc9-8a83-2980050a1779" />
+<img width="1242" height="985" alt="image" src="https://github.com/user-attachments/assets/4c648ba5-ee1f-4dd9-b46b-3786dd136546" />
+<img width="1323" height="1001" alt="image" src="https://github.com/user-attachments/assets/e00762c3-bcad-494d-9b78-7ff5a14ad576" />
+
+
 ## 安装
 
 本插件是一个标准的 DSH bundle（`package.json` 里声明 `dsh.bundle.patch` 和 `dsh.client`，无需构建、无第三方运行时依赖）。
