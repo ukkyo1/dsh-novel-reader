@@ -55,7 +55,6 @@
       var Z_INDEX = 2147483000; // 高于输入框区域的层叠上下文，避免被裁切/遮挡
       var SAVED_FLASH_MS = 2200;
       var READING_MARKER = '\u2063';
-      var FLIP_MS = 280;
       var DEFAULT_READING_STYLE = {
         fontSize: 15,
         lineHeight: 1.8,
@@ -65,7 +64,26 @@
         pagePadding: 18,
         pageMaxWidth: 0,
         fontFamily: '',
+        flip: 'fast',
       };
+      // 单章分页结果缓存：追加下一章时只排新章，不再把所有已加载章节重排一遍。
+      var readingPageCache = new Map();
+
+      function readingFlipMs(style) {
+        var mode = style && style.flip;
+        if (mode === 'none') return 0;
+        if (mode === 'normal') return 280;
+        return 140;
+      }
+
+      function readingTextStamp(text) {
+        var value = String(text || '');
+        var hash = 5381;
+        for (var index = 0; index < value.length; index += 1) {
+          hash = ((hash << 5) + hash + value.charCodeAt(index)) | 0;
+        }
+        return value.length + ':' + (hash >>> 0).toString(36);
+      }
       var DEFAULT_GENERATION = {
         mode: 'duration',
         seconds: 4,
@@ -78,6 +96,17 @@
       var readingFlipSeq = 0;
       var readerRpc = null;
       var readerT = null;
+      var uiDebugLastAt = 0;
+
+      function reportUiDebug(rpc, payload) {
+        if (typeof rpc !== 'function') return;
+        var now = Date.now();
+        if (now - uiDebugLastAt < 1200) return;
+        uiDebugLastAt = now;
+        try {
+          invoke(rpc, 'debug', payload || {}).catch(function () { /* 排障失败不影响阅读 */ });
+        } catch (error) { /* 忽略 */ }
+      }
 
       /* ────────────────────────────── 字典 ────────────────────────────── */
 
@@ -125,6 +154,10 @@
         'settings.style.pagePadding': '页边距（px）',
         'settings.style.pageMaxWidth': '最大宽度（px，0=自适应）',
         'settings.style.fontFamily': '字体（CSS font-family，可留空）',
+        'settings.style.flip': '翻页效果',
+        'settings.style.flipNone': '无动画',
+        'settings.style.flipFast': '快速覆盖',
+        'settings.style.flipNormal': '标准覆盖',
         'settings.style.save': '保存样式',
         'settings.style.reset': '恢复默认样式',
         'settings.style.saved': '样式已保存',
@@ -145,6 +178,11 @@
         'reading.next': '下一页',
         'reading.zoneHint': '点击页面左侧上一页、右侧下一页',
         'reading.end': '本章完 · 回复任意消息继续',
+        'reading.nextChapter': '下一章',
+        'reading.bookEnd': '全书完',
+        'reading.loadingNext': '正在载入下一章…',
+        'reading.nextChapterHint': '本章最后一页 · 点「下一章」继续读',
+        'reading.endBookHint': '全书读完了 · 回复任意消息可换一本',
         'reading.generating': '正在生成本章…',
       };
 
@@ -192,6 +230,10 @@
         'settings.style.pagePadding': 'Page padding (px)',
         'settings.style.pageMaxWidth': 'Max width (px, 0 = auto)',
         'settings.style.fontFamily': 'Font (CSS font-family, optional)',
+        'settings.style.flip': 'Page turn',
+        'settings.style.flipNone': 'No animation',
+        'settings.style.flipFast': 'Quick cover',
+        'settings.style.flipNormal': 'Standard cover',
         'settings.style.save': 'Save style',
         'settings.style.reset': 'Reset style',
         'settings.style.saved': 'Style saved',
@@ -212,6 +254,11 @@
         'reading.next': 'Next page',
         'reading.zoneHint': 'Click the left side for the previous page, the right side for the next',
         'reading.end': 'Chapter end · send any message to continue',
+        'reading.nextChapter': 'Next chapter',
+        'reading.bookEnd': 'End of book',
+        'reading.loadingNext': 'Loading next chapter…',
+        'reading.nextChapterHint': 'Last page of this chapter · click Next chapter to keep reading',
+        'reading.endBookHint': 'You reached the end of the book · send any message to pick another',
         'reading.generating': 'Generating this chapter…',
       };
 
@@ -596,6 +643,7 @@
 .dnr-style-field--wide { grid-column: 1 / -1; }
 .dnr-style-label { font-size: 12px; line-height: 1.4; color: var(--dsw-alias-label-secondary, #6b6b6b); }
 .dnr-gen-modes { display: flex; flex-wrap: wrap; gap: 8px; }
+.dnr-style-flip { display: flex; flex-direction: column; gap: 6px; }
 .dnr-gen-mode--active {
   border-color: var(--dsw-alias-brand-primary, #3d63e6);
   color: var(--dsw-alias-brand-primary, #3d63e6);
@@ -775,6 +823,9 @@
           pagePadding: pick('pagePadding', DEFAULT_READING_STYLE.pagePadding, 0, 64),
           pageMaxWidth: pick('pageMaxWidth', DEFAULT_READING_STYLE.pageMaxWidth, 0, 1400),
           fontFamily: typeof source.fontFamily === 'string' ? source.fontFamily.trim() : '',
+          flip: source.flip === 'none' || source.flip === 'fast' || source.flip === 'normal'
+            ? source.flip
+            : DEFAULT_READING_STYLE.flip,
         };
       }
 
@@ -887,17 +938,50 @@
           style: style || DEFAULT_READING_STYLE,
           t: t,
           sessionId: props.sessionId,
+          rpc: rpc,
         });
       }
 
       function ReadingPageView(props) {
         var t = typeof props.t === 'function' ? props.t : function (key) { return String(key); };
         var style = props.style || DEFAULT_READING_STYLE;
-        var blocks = React.useMemo(function () { return readingBlocks(props.text); }, [props.text]);
+        var rpc = typeof props.rpc === 'function' ? props.rpc : readerRpc;
+        var sessionId = typeof props.sessionId === 'string' ? props.sessionId : '';
+        var initialDoc = React.useMemo(function () {
+          return props.running ? null : [{ text: String(props.text || ''), chapter: null }];
+        }, []);
+        var docsState = useState(initialDoc);
+        var docs = docsState[0];
+        var setDocs = docsState[1];
+        var chapterState = useState(null);
+        var chapterInfo = chapterState[0];
+        var setChapterInfo = chapterState[1];
+        var loadingState = useState(false);
+        var loadingNext = loadingState[0];
+        var setLoadingNext = loadingState[1];
+        var endedState = useState(false);
+        var bookEnded = endedState[0];
+        var setBookEnded = endedState[1];
+        var errorState = useState('');
+        var error = errorState[0];
+        var setError = errorState[1];
+        var prefetchNonceState = useState(0);
+        var prefetchNonce = prefetchNonceState[0];
+        var setPrefetchNonce = prefetchNonceState[1];
+        var aliveRef = useRef(true);
+        var loadingRef = useRef(false);
+        var epochRef = useRef(0);
+        var prefetchRef = useRef(null);
+        var prefetchingRef = useRef(false);
+        var prefetchPrepareTimer = useRef(null);
+        var commitPendingRef = useRef(null);
+        var pendingDocRef = useRef(null);
+
         var containerRef = useRef(null);
         var measureRef = useRef(null);
         var flipTimer = useRef(null);
         var memoryKeyRef = useRef('');
+        var pageIndexRef = useRef(0);
 
         var pagesState = useState([]);
         var pages = pagesState[0];
@@ -906,6 +990,7 @@
         var indexState = useState(0);
         var pageIndex = indexState[0];
         var setPageIndex = indexState[1];
+        pageIndexRef.current = pageIndex;
 
         var widthState = useState(0);
         var width = widthState[0];
@@ -915,16 +1000,73 @@
         var flip = flipState[0];
         var setFlip = flipState[1];
 
+        var safetyState = useState(0);
+        var safetyExtra = safetyState[0];
+        var setSafetyExtra = safetyState[1];
+        var availableState = useState(0);
+        var availableHeight = availableState[0];
+        var setAvailableHeight = availableState[1];
+        var effectivePageHeight = style.pageHeight;
+        if (availableHeight > 0) {
+          // 宿主的思考区域可能有自己的最大高度/滚动容器；页面高度取两者较小值，避免每页都要滚动。
+          effectivePageHeight = Math.max(240, Math.min(style.pageHeight, availableHeight - 76));
+        }
+        var sheetRef = useRef(null);
+        var overflowTriesRef = useRef(0);
+
         var styleKey = [
           style.fontSize, style.lineHeight, style.letterSpacing, style.paragraphSpacing,
           style.pageHeight, style.pagePadding, style.pageMaxWidth, style.fontFamily,
         ].join('|');
-        var pagesKey = React.useMemo(function () {
-          var head = blocks.length > 0 ? blocks[0].slice(0, 24) : '';
-          var tail = blocks.length > 0 ? blocks[blocks.length - 1].slice(-24) : '';
-          return blocks.length + '|' + head + '|' + tail;
-        }, [blocks]);
-        var memoryKey = String(props.sessionId || '') + '|' + pagesKey;
+        var docCacheBase = styleKey + '|' + width + '|' + effectivePageHeight + '|' + safetyExtra;
+        var docBlocks = React.useMemo(function () {
+          return (docs || []).map(function (doc) { return readingBlocks(doc.text); });
+        }, [docs]);
+        var docsKey = React.useMemo(function () {
+          if (!docs) return 'none';
+          return docs.map(function (doc) { return String(doc.text.length); }).join(',');
+        }, [docs]);
+        var memoryKey = sessionId + '|' + docsKey;
+
+        useEffect(function () {
+          aliveRef.current = true;
+          return function () {
+            aliveRef.current = false;
+            if (flipTimer.current !== null) {
+              clearTimeout(flipTimer.current);
+              flipTimer.current = null;
+            }
+            if (prefetchPrepareTimer.current !== null) {
+              clearTimeout(prefetchPrepareTimer.current);
+              prefetchPrepareTimer.current = null;
+            }
+          };
+        }, []);
+
+        // 首段正文/章节信息同步到 docs；流式结束后再分页。
+        useEffect(function () {
+          if (props.running) return;
+          setDocs(function (previous) {
+            var headChapter = previous && previous.length > 0 ? (previous[0].chapter || chapterInfo) : chapterInfo;
+            var head = { text: String(props.text || ''), chapter: headChapter || null };
+            if (!previous || previous.length === 0) return [head];
+            if (previous[0].text === head.text && previous[0].chapter === head.chapter) return previous;
+            var next = previous.slice();
+            next[0] = head;
+            return next;
+          });
+        }, [props.text, props.running, chapterInfo]);
+
+        useEffect(function () {
+          if (!rpc || sessionId === '') return undefined;
+          var alive = true;
+          invoke(rpc, 'session', { sessionId: sessionId }).then(function (value) {
+            if (!alive) return;
+            var normalized = normalizeSession(value);
+            if (normalized.chapter) setChapterInfo(normalized.chapter);
+          }, function () { /* 没有章节信息也能阅读 */ });
+          return function () { alive = false; };
+        }, []);
 
         useEffect(function () {
           var node = containerRef.current;
@@ -944,25 +1086,72 @@
         }, []);
 
         useEffect(function () {
-          return function () {
-            if (flipTimer.current !== null) {
-              clearTimeout(flipTimer.current);
-              flipTimer.current = null;
+          var node = containerRef.current;
+          if (!node) return undefined;
+          var measureAvailability = function () {
+            var element = node.parentElement;
+            var capped = 0;
+            while (element) {
+              var computed = window.getComputedStyle(element);
+              var maxHeight = computed.maxHeight;
+              var limit = maxHeight && maxHeight !== 'none' ? parseFloat(maxHeight) : NaN;
+              if (isFinite(limit) && limit > 0) {
+                capped = limit;
+                break;
+              }
+              element = element.parentElement;
             }
+            var next = capped > 0 ? capped : (window.innerHeight || 800);
+            setAvailableHeight(function (previous) { return previous === next ? previous : next; });
+          };
+          measureAvailability();
+          var timer = window.setInterval(measureAvailability, 1500);
+          window.addEventListener('resize', measureAvailability);
+          return function () {
+            window.clearInterval(timer);
+            window.removeEventListener('resize', measureAvailability);
           };
         }, []);
 
-        React.useLayoutEffect(function () {
-          if (props.running || blocks.length === 0 || width <= 0) {
-            if (props.running) setPages([]);
+        useEffect(function () {
+          if (!props.running) return;
+          try {
+            reportUiDebug(rpc, {
+              marker: true,
+              stage: 'running',
+              textLen: String(props.text || '').length,
+              pageHeight: effectivePageHeight,
+            });
+          } catch (error) { /* 诊断不能影响阅读 */ }
+        }, [props.running]);
+
+        var beginFlip = function (target, from) {
+          if (target === from || pages.length === 0) return;
+          if (flipTimer.current !== null) {
+            clearTimeout(flipTimer.current);
+            flipTimer.current = null;
+          }
+          var duration = readingFlipMs(style);
+          if (duration <= 0) {
+            setFlip(null);
+            setPageIndex(target);
             return;
           }
+          setFlip({ from: from, dir: target > from ? 1 : -1, ms: duration });
+          setPageIndex(target);
+          readingFlipSeq += 1;
+          flipTimer.current = setTimeout(function () {
+            flipTimer.current = null;
+            setFlip(null);
+          }, duration + 60);
+        };
+
+        var paginateDocument = function (docText, blocks) {
           var measure = measureRef.current;
-          if (!measure) return;
+          if (!measure || width <= 0) return null;
           var sheetWidth = style.pageMaxWidth > 0 ? Math.min(width, style.pageMaxWidth) : width;
           var contentWidth = Math.max(80, sheetWidth - style.pagePadding * 2);
-          // 多留一点余量：不同字体/缩放下测量可能差一两像素，宁可少排一行也不要溢出。
-          var capacity = Math.max(40, style.pageHeight - style.pagePadding * 2 - Math.max(4, Math.round(style.fontSize * 0.6)));
+          var capacity = Math.max(40, effectivePageHeight - style.pagePadding * 2 - Math.max(4, Math.round(style.fontSize * 0.6)) - safetyExtra);
           measure.style.width = contentWidth + 'px';
           var gap = Math.round(style.paragraphSpacing * style.fontSize);
           var heightOf = function (value) {
@@ -994,6 +1183,9 @@
             }
             return best;
           };
+          var cacheKey = docCacheBase + '|' + readingTextStamp(docText);
+          var cachedPages = readingPageCache.get(cacheKey);
+          if (Array.isArray(cachedPages)) return cachedPages;
           var pageList = [];
           var current = [];
           var used = 0;
@@ -1024,17 +1216,120 @@
           }
           if (current.length > 0) pageList.push(current);
           if (pageList.length === 0) pageList.push(['']);
-          setPages(pageList);
-          var remembered = readingPageMemory.get(memoryKey);
-          var sameDocument = memoryKeyRef.current === memoryKey;
-          memoryKeyRef.current = memoryKey;
-          setPageIndex(function (previous) {
-            var next;
-            if (sameDocument) next = remembered === undefined ? previous : remembered;
-            else next = remembered === undefined ? 0 : remembered;
-            return Math.max(0, Math.min(next, pageList.length - 1));
+          readingPageCache.set(cacheKey, pageList);
+          if (readingPageCache.size > 80) {
+            var oldestKey = readingPageCache.keys().next();
+            if (!oldestKey.done) readingPageCache.delete(oldestKey.value);
+          }
+          return pageList;
+        };
+
+        React.useLayoutEffect(function () {
+          if (props.running || docBlocks.length === 0 || width <= 0) {
+            if (props.running) setPages([]);
+            return;
+          }
+          var flat = [];
+          for (var docIndex = 0; docIndex < docBlocks.length; docIndex += 1) {
+            var blocks = docBlocks[docIndex];
+            if (!blocks || blocks.length === 0) blocks = [''];
+            var docText = docs && docs[docIndex] ? docs[docIndex].text : '';
+            var pageList = paginateDocument(docText, blocks);
+            if (!pageList) return;
+            for (var pageInDoc = 0; pageInDoc < pageList.length; pageInDoc += 1) {
+              flat.push({
+                doc: docIndex,
+                blocks: pageList[pageInDoc],
+                index: pageInDoc,
+                total: pageList.length,
+              });
+            }
+          }
+          setPages(flat);
+          var pendingDoc = pendingDocRef.current;
+          pendingDocRef.current = null;
+          if (pendingDoc !== null) {
+            var targetIndex = -1;
+            for (var flatIndex = 0; flatIndex < flat.length; flatIndex += 1) {
+              if (flat[flatIndex].doc === pendingDoc) { targetIndex = flatIndex; break; }
+            }
+            if (targetIndex >= 0) {
+              beginFlip(targetIndex, pageIndexRef.current);
+              try {
+                reportUiDebug(rpc, { marker: true, stage: 'next-chapter', targetIndex, pages: flat.length });
+              } catch (error) { /* 诊断不能影响阅读 */ }
+            }
+          } else {
+            var remembered = readingPageMemory.get(memoryKey);
+            var sameDocument = memoryKeyRef.current === memoryKey;
+            memoryKeyRef.current = memoryKey;
+            setPageIndex(function (previous) {
+              var next;
+              if (sameDocument) next = remembered === undefined ? previous : remembered;
+              else next = remembered === undefined ? 0 : remembered;
+              return Math.max(0, Math.min(next, flat.length - 1));
+            });
+          }
+          var reportSheetWidth = style.pageMaxWidth > 0 ? Math.min(width, style.pageMaxWidth) : width;
+          var reportCapacity = Math.max(40, effectivePageHeight - style.pagePadding * 2 - Math.max(4, Math.round(style.fontSize * 0.6)) - safetyExtra);
+          var reportContentWidth = Math.max(80, reportSheetWidth - style.pagePadding * 2);
+          try {
+          reportUiDebug(rpc, {
+            marker: true,
+            stage: 'pages',
+            sessionId: sessionId,
+            viewportHeight: typeof window !== 'undefined' ? window.innerHeight : 0,
+            readerHeight: containerRef.current ? containerRef.current.offsetHeight : 0,
+            sheetClient: sheetRef.current ? sheetRef.current.clientHeight : 0,
+            sheetScroll: sheetRef.current ? sheetRef.current.scrollHeight : 0,
+            pages: flat.length,
+            docs: docBlocks.length,
+            pageHeight: effectivePageHeight,
+            configuredPageHeight: style.pageHeight,
+            availableHeight,
+            padding: style.pagePadding,
+            capacity: reportCapacity,
+            width,
+            contentWidth: reportContentWidth,
+            fontSize: style.fontSize,
+            lineHeight: style.lineHeight,
+            safetyExtra,
+            ancestors: (function () {
+              var list = [];
+              var element = containerRef.current;
+              for (var level = 0; level < 10 && element; level += 1) {
+                var computed = window.getComputedStyle(element);
+                list.push({
+                  ch: element.clientHeight,
+                  sh: element.scrollHeight,
+                  oy: computed.overflowY,
+                  mh: computed.maxHeight,
+                });
+                element = element.parentElement;
+              }
+              return list;
+            })(),
           });
-        }, [pagesKey, styleKey, width, props.running, memoryKey]);
+          } catch (error) { /* 诊断不能影响阅读 */ }
+        }, [docsKey, styleKey, width, props.running, memoryKey, safetyExtra, availableHeight, effectivePageHeight]);
+
+        // 兜底：真实渲染出来的页面如果仍然溢出（字体/缩放差异），自动加大安全余量重排。
+        useEffect(function () {
+          if (props.running) return;
+          var node = sheetRef.current;
+          if (!node || pages.length === 0) return;
+          if (node.scrollHeight > node.clientHeight + 1 && overflowTriesRef.current < 10) {
+            overflowTriesRef.current += 1;
+            setSafetyExtra(function (previous) {
+              return previous + Math.ceil(style.fontSize * style.lineHeight);
+            });
+          }
+        }, [pages, pageIndex, props.running, style.fontSize, style.lineHeight]);
+
+        useEffect(function () {
+          overflowTriesRef.current = 0;
+          setSafetyExtra(0);
+        }, [memoryKey, styleKey]);
 
         useEffect(function () {
           if (props.running || pages.length === 0) return;
@@ -1046,20 +1341,116 @@
         }, [pageIndex, memoryKey, pages.length, props.running]);
 
         var goTo = function (next) {
-          var target = Math.max(0, Math.min(next, pages.length - 1));
-          if (target === pageIndex || pages.length === 0) return;
-          if (flipTimer.current !== null) {
-            clearTimeout(flipTimer.current);
-            flipTimer.current = null;
-          }
-          setFlip({ from: pageIndex, dir: target > pageIndex ? 1 : -1 });
-          setPageIndex(target);
-          readingFlipSeq += 1;
-          flipTimer.current = setTimeout(function () {
-            flipTimer.current = null;
-            setFlip(null);
-          }, FLIP_MS + 80);
+          beginFlip(Math.max(0, Math.min(next, pages.length - 1)), pageIndex);
         };
+
+        var appendChapter = function (value) {
+          var currentCount = docs ? docs.length : 0;
+          pendingDocRef.current = currentCount;
+          setDocs(function (previous) {
+            var base = previous || [];
+            return base.concat([{ text: value.text, chapter: value.chapter || null }]);
+          });
+          if (value.finished === true) setBookEnded(true);
+        };
+
+        var loadNextChapter = function () {
+          if (loadingRef.current || bookEnded || !rpc || sessionId === '') return;
+          if (commitPendingRef.current !== null) {
+            loadingRef.current = true;
+            setLoadingNext(true);
+            var pendingCommit = commitPendingRef.current;
+            pendingCommit.then(function () {
+              loadingRef.current = false;
+              setLoadingNext(false);
+              if (aliveRef.current) loadNextChapter();
+            });
+            return;
+          }
+          var cached = prefetchRef.current;
+          prefetchRef.current = null;
+          if (cached) {
+            if (cached.finished) {
+              setBookEnded(true);
+              return;
+            }
+            epochRef.current += 1;
+            // peek 只取正文、没有推进进度；这里补一次正式推进，但不阻塞翻页。
+            var pendingCommit = invoke(rpc, 'nextChapter', { sessionId: sessionId }).catch(function () {
+              /* 进度落盘失败不影响本地阅读 */
+            }).then(function () {
+              if (commitPendingRef.current === pendingCommit) commitPendingRef.current = null;
+              if (aliveRef.current) setPrefetchNonce(function (previous) { return previous + 1; });
+            });
+            commitPendingRef.current = pendingCommit;
+            appendChapter(cached.value);
+            return;
+          }
+          loadingRef.current = true;
+          setLoadingNext(true);
+          setError('');
+          var epoch = epochRef.current + 1;
+          epochRef.current = epoch;
+          invoke(rpc, 'nextChapter', { sessionId: sessionId }).then(function (value) {
+            if (!aliveRef.current || epoch !== epochRef.current) return;
+            loadingRef.current = false;
+            setLoadingNext(false);
+            if (!value || value.finished === true || typeof value.text !== 'string' || value.text === '') {
+              setBookEnded(true);
+              return;
+            }
+            appendChapter(value);
+          }, function (failure) {
+            if (!aliveRef.current || epoch !== epochRef.current) return;
+            loadingRef.current = false;
+            setLoadingNext(false);
+            setError(errorText(failure));
+          });
+        };
+
+        var schedulePrefetchPagination = function (text) {
+          if (prefetchPrepareTimer.current !== null) clearTimeout(prefetchPrepareTimer.current);
+          var run = function () {
+            prefetchPrepareTimer.current = null;
+            if (!aliveRef.current) return;
+            try {
+              paginateDocument(text, readingBlocks(text));
+            } catch (error) { /* 预排失败时点击后还会再排一次 */ }
+          };
+          if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+            prefetchPrepareTimer.current = window.setTimeout(function () {
+              if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+                window.requestIdleCallback(run, { timeout: 1500 });
+              } else {
+                run();
+              }
+            }, 80);
+          } else {
+            prefetchPrepareTimer.current = window.setTimeout(run, 120);
+          }
+        };
+
+        // 有正文页后立刻在后台预取下一章（只取正文不推进进度），并把新章分页也预先排好。
+        useEffect(function () {
+          if (props.running || pages.length === 0) return;
+          if (bookEnded || loadingRef.current || prefetchingRef.current || prefetchRef.current !== null) return;
+          if (commitPendingRef.current !== null) return;
+          if (!rpc || sessionId === '') return;
+          var epoch = epochRef.current;
+          prefetchingRef.current = true;
+          invoke(rpc, 'nextChapter', { sessionId: sessionId, peek: true }).then(function (value) {
+            prefetchingRef.current = false;
+            if (!aliveRef.current || epoch !== epochRef.current) return;
+            if (!value || value.finished === true || typeof value.text !== 'string' || value.text === '') {
+              prefetchRef.current = { finished: true };
+              return;
+            }
+            prefetchRef.current = { value: value };
+            schedulePrefetchPagination(value.text);
+          }, function () {
+            prefetchingRef.current = false;
+          });
+        }, [pages.length, props.running, bookEnded, sessionId, rpc, prefetchNonce]);
 
         var gapPx = Math.round(style.paragraphSpacing * style.fontSize);
         var typography = {
@@ -1079,44 +1470,70 @@
           top: 0,
           left: sheetLeft + 'px',
           width: sheetWidth > 0 ? sheetWidth + 'px' : '100%',
-          height: style.pageHeight + 'px',
+          height: effectivePageHeight + 'px',
           boxSizing: 'border-box',
           padding: style.pagePadding + 'px',
           overflow: 'hidden',
           background: 'var(--dsw-alias-bg-base, #ffffff)',
+          animationDuration: readingFlipMs(style) + 'ms',
         };
-        var renderSheet = function (list, className) {
-          var content = (list || []).map(function (block, index) {
+        var renderSheet = function (page, className, isCurrent) {
+          var list = page && page.blocks ? page.blocks : [];
+          var content = list.map(function (block, index) {
             return h('p', {
               key: index,
               style: { margin: index === list.length - 1 ? 0 : '0 0 ' + gapPx + 'px' },
             }, block);
           });
-          return h('div', { className: 'dnr-reader-sheet ' + className, style: sheetStyle },
-            h('div', { style: typography }, content));
+          return h('div', {
+            ref: isCurrent ? sheetRef : undefined,
+            className: 'dnr-reader-sheet ' + className,
+            style: sheetStyle,
+          }, h('div', { style: typography }, content));
         };
 
+        var currentPage = pages[pageIndex] || null;
+        var currentChapter = null;
+        if (currentPage && docs && docs[currentPage.doc] && docs[currentPage.doc].chapter) {
+          currentChapter = docs[currentPage.doc].chapter;
+        } else if (currentPage && currentPage.doc === 0) {
+          currentChapter = chapterInfo;
+        }
+        var pageText = currentPage ? t('reading.page', { index: currentPage.index + 1, total: currentPage.total }) : '';
+        var chapterText = currentChapter ? t('chapter.label', currentChapter) : '';
+        var footerInfo = chapterText !== '' ? chapterText + ' · ' + pageText : pageText;
+        var atLastPage = pages.length > 0 && pageIndex >= pages.length - 1;
+        var nextDisabled = pages.length === 0 || loadingNext || (atLastPage && bookEnded);
+        var nextLabel = atLastPage
+          ? (bookEnded ? t('reading.bookEnd') : (loadingNext ? t('reading.loadingNext') : t('reading.nextChapter')))
+          : t('reading.next');
         var runningText = unescapeReadingMarks(String(props.text || '').split(READING_MARKER).join('').trim());
         var runningStyle = {
           position: 'relative',
           width: '100%',
-          height: style.pageHeight + 'px',
+          height: effectivePageHeight + 'px',
           boxSizing: 'border-box',
           padding: style.pagePadding + 'px',
           overflow: 'hidden',
           background: 'var(--dsw-alias-bg-base, #ffffff)',
         };
+        var hintText;
+        if (props.running) hintText = t('reading.generating');
+        else if (error !== '') hintText = t('settings.error') + '：' + error;
+        else if (loadingNext) hintText = t('reading.loadingNext');
+        else if (atLastPage && bookEnded) hintText = t('reading.endBookHint');
+        else if (atLastPage) hintText = t('reading.nextChapterHint');
+        else hintText = t('reading.zoneHint');
+
         return h('div', { className: 'dnr-reader', ref: containerRef },
           StyleTag(),
           props.running
             ? h('div', { className: 'dnr-reader-sheet', style: runningStyle },
               h('div', { style: typography }, runningText),
               h('div', { className: 'dnr-reader-running' }, t('reading.generating')))
-            : h('div', { className: 'dnr-reader-box', style: { position: 'relative', height: style.pageHeight + 'px', width: '100%' } },
-              flip !== null && pages[flip.from] !== undefined
-                ? renderSheet(pages[flip.from], 'dnr-reader-sheet--old')
-                : null,
-              renderSheet(pages[pageIndex] || [], flip === null ? '' : (flip.dir > 0 ? 'dnr-reader-sheet--next' : 'dnr-reader-sheet--prev')),
+            : h('div', { className: 'dnr-reader-box', style: { position: 'relative', height: effectivePageHeight + 'px', width: '100%' } },
+              flip !== null && pages[flip.from] ? renderSheet(pages[flip.from], 'dnr-reader-sheet--old', false) : null,
+              renderSheet(currentPage, flip === null ? '' : (flip.dir > 0 ? 'dnr-reader-sheet--next' : 'dnr-reader-sheet--prev'), true),
               h('button', {
                 type: 'button',
                 className: 'dnr-reader-zone dnr-reader-zone--prev',
@@ -1126,8 +1543,8 @@
               h('button', {
                 type: 'button',
                 className: 'dnr-reader-zone dnr-reader-zone--next',
-                'aria-label': t('reading.next'),
-                onClick: function () { goTo(pageIndex + 1); },
+                'aria-label': atLastPage ? t('reading.nextChapter') : t('reading.next'),
+                onClick: function () { if (atLastPage) loadNextChapter(); else goTo(pageIndex + 1); },
               })
             ),
           h('div', { className: 'dnr-reader-measure', ref: measureRef, style: typography }),
@@ -1138,18 +1555,14 @@
               disabled: pages.length === 0 || pageIndex <= 0,
               onClick: function () { goTo(pageIndex - 1); },
             }, '‹ ' + t('reading.prev')),
-            h('span', { className: 'dnr-reader-pageinfo' },
-              pages.length > 0 ? t('reading.page', { index: pageIndex + 1, total: pages.length }) : ''),
+            h('span', { className: 'dnr-reader-pageinfo' }, footerInfo),
             h('button', {
               type: 'button',
               className: 'dnr-btn dnr-reader-nav',
-              disabled: pages.length === 0 || pageIndex >= pages.length - 1,
-              onClick: function () { goTo(pageIndex + 1); },
-            }, t('reading.next') + ' ›')),
-          h('div', { className: 'dnr-reader-footer-hint' },
-            props.running
-              ? t('reading.generating')
-              : (pages.length > 0 && pageIndex < pages.length - 1 ? t('reading.zoneHint') : t('reading.end')))
+              disabled: nextDisabled,
+              onClick: function () { if (atLastPage) loadNextChapter(); else goTo(pageIndex + 1); },
+            }, nextLabel + (atLastPage && bookEnded ? '' : ' ›'))),
+          h('div', { className: 'dnr-reader-footer-hint' }, hintText)
         );
       }
 
@@ -1232,14 +1645,6 @@
             clearInterval(timer);
           };
         }, [sessionId, fetchSession]);
-
-        // 阅读模式开启时临时接管「思考」正文（翻页阅读器）；退出时交还官方渲染。
-        useEffect(function () {
-          var active = session !== null && session.active === true;
-          if (!active || typeof props.setReasoningBodyActive !== 'function') return undefined;
-          props.setReasoningBodyActive(true);
-          return function () { props.setReasoningBodyActive(false); };
-        }, [session !== null && session.active === true]);
 
         // 打开时拉小说列表（每次打开都刷新，避免吃到旧目录）。
         useEffect(function () {
@@ -1713,6 +2118,7 @@
             if (isFinite(number)) payload[name] = number;
           });
           payload.fontFamily = typeof source.fontFamily === 'string' ? source.fontFamily : '';
+          if (source.flip === 'none' || source.flip === 'fast' || source.flip === 'normal') payload.flip = source.flip;
           return payload;
         };
 
@@ -1771,12 +2177,30 @@
             value: styleDraft && typeof styleDraft.fontFamily === 'string' ? styleDraft.fontFamily : '',
             onChange: function (event) { editStyleField('fontFamily', event.target.value); },
           })));
+        var flipModeNodes = [
+          ['none', 'settings.style.flipNone'],
+          ['fast', 'settings.style.flipFast'],
+          ['normal', 'settings.style.flipNormal'],
+        ].map(function (entry) {
+          var active = styleDraft !== null && styleDraft.flip === entry[0];
+          return h('button', {
+            key: entry[0],
+            type: 'button',
+            className: 'dnr-btn dnr-gen-mode' + (active ? ' dnr-gen-mode--active' : ''),
+            'aria-pressed': active,
+            disabled: styleBusy,
+            onClick: function () { editStyleField('flip', entry[0]); },
+          }, t(entry[1]));
+        });
         var styleCard = h('div', { className: 'dnr-style-card' },
           h('div', { className: 'dnr-style-head' },
             h('div', { className: 'dnr-settings-title' }, t('settings.style.title')),
             styleNoticed ? h('span', { className: 'dnr-novel-saved' }, t('settings.style.saved')) : null),
           h('p', { className: 'dnr-settings-folder-note' }, t('settings.style.hint')),
           h('div', { className: 'dnr-style-grid' }, styleFieldNodes),
+          h('div', { className: 'dnr-style-flip' },
+            h('span', { className: 'dnr-style-label' }, t('settings.style.flip')),
+            h('div', { className: 'dnr-gen-modes' }, flipModeNodes)),
           h('div', { className: 'dnr-settings-toolbar' },
             h('button', {
               type: 'button',
@@ -1955,12 +2379,12 @@
             'aria-pressed': active,
             disabled: genBusy,
             onClick: function () {
-              setGenDraft(function (previous) {
-                var next = Object.assign({}, previous || DEFAULT_GENERATION);
-                next.mode = entry[0];
-                return next;
-              });
+              var next = Object.assign({}, genDraft || DEFAULT_GENERATION);
+              next.mode = entry[0];
+              setGenDraft(next);
               setGenNoticed(false);
+              // 点选即生效：不再依赖用户再按一次「保存速度」。
+              saveGeneration(generationPayloadFromDraft(next));
             },
           }, t(entry[1]));
         });
@@ -1975,6 +2399,7 @@
               step: '0.5',
               value: genDraft.seconds === undefined ? '' : String(genDraft.seconds),
               onChange: function (event) { editGeneration('seconds', event.target.value); },
+              onBlur: function () { saveGeneration(generationPayloadFromDraft(genDraft)); },
             }));
         } else if (genDraft !== null && genDraft.mode === 'speed') {
           generationValueNode = h('label', { className: 'dnr-style-field' },
@@ -1985,6 +2410,7 @@
               step: '10',
               value: genDraft.charsPerSecond === undefined ? '' : String(genDraft.charsPerSecond),
               onChange: function (event) { editGeneration('charsPerSecond', event.target.value); },
+              onBlur: function () { saveGeneration(generationPayloadFromDraft(genDraft)); },
             }));
         }
 
@@ -2191,48 +2617,20 @@
         readerRpc = rpc;
         readerT = t;
 
-        // 「思考」正文的临时接管：只有阅读模式被打开时才占用这个槽位，退出即交还官方渲染。
-        var reasoningBodyStop = null;
-        var reasoningBodyUsers = 0;
-        function stopReasoningBody() {
-          if (reasoningBodyStop !== null) {
-            try { reasoningBodyStop(); } catch (error) { /* 忽略 */ }
-            reasoningBodyStop = null;
-          }
-        }
-        function startReasoningBody() {
-          if (reasoningBodyStop !== null) return;
-          try {
-            reasoningBodyStop = ctx.slots.inject('conversation.chat.reasoning.body', function () {
-              return ctx.slots.register({
-                name: 'conversation.chat.reasoning.body',
-                priority: 50,
-                locale: NS,
-              }, function (slotProps) {
-                return guard(ReadingReasoningBody, slotProps, t);
-              });
+        // 「思考」正文：始终以更小优先级覆盖官方渲染器；只有带隐形标记的阅读正文才分页，
+        // 其它情况（真实模型思考）原样交回官方内容工厂，行为不变。
+        try {
+          ctx.slots.inject('conversation.chat.reasoning.body', function () {
+            return ctx.slots.register({
+              name: 'conversation.chat.reasoning.body',
+              priority: 50,
+              locale: NS,
+            }, function (slotProps) {
+              return guard(ReadingReasoningBody, slotProps, t);
             });
-          } catch (failure) {
-            reasoningBodyStop = null;
-            try { console.warn('[novel-reader] reasoning body registration failed:', failure); } catch (ignored) { /* 忽略 */ }
-          }
-        }
-        function setReasoningBodyActive(active) {
-          if (active) {
-            reasoningBodyUsers += 1;
-            if (reasoningBodyUsers === 1) startReasoningBody();
-          } else {
-            reasoningBodyUsers = Math.max(0, reasoningBodyUsers - 1);
-            if (reasoningBodyUsers === 0) stopReasoningBody();
-          }
-        }
-        if (typeof ctx.effect === 'function') {
-          ctx.effect(function () {
-            return function () {
-              reasoningBodyUsers = 0;
-              stopReasoningBody();
-            };
-          }, 'novel-reader: release reasoning body override');
+          });
+        } catch (failure) {
+          try { console.warn('[novel-reader] reasoning body registration failed:', failure); } catch (ignored) { /* 忽略 */ }
         }
 
         try {
@@ -2247,7 +2645,6 @@
                   sessionId: sessionId,
                   t: t,
                   rpc: rpc,
-                  setReasoningBodyActive: setReasoningBodyActive,
                 };
               },
             }, function (slotProps) {

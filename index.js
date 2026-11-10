@@ -23,7 +23,7 @@ const RPC_ENDPOINT = 'novel-reader';
 const STATE_FILE = '.reader-state.json';
 const STATE_VERSION = 1;
 /** 运行中代码的代次标记：写进状态文件，便于确认热重载后真的换成了新代码。 */
-const BUILD_MARKER = '2026-11-10-pace-v8';
+const BUILD_MARKER = '2026-11-10-smooth-chapter-v14';
 const DEFAULT_CHUNK_CHARS = 420;
 const DEFAULT_FIRST_TOKEN_DELAY_MS = 350;
 // 每个流式片段的字数：4 字 + 55ms 左右 ≈ 60-90 字/秒，接近真实模型中文出词速度。
@@ -80,10 +80,12 @@ const DEFAULT_READING_STYLE = {
   pagePadding: 18,
   pageMaxWidth: 0,
   fontFamily: '',
+  // 翻页效果：none=直接切换；fast=140ms 快速覆盖；normal=280ms 标准覆盖
+  flip: 'fast',
 };
 /** 正文出字方式：instant=瞬间、duration=整段用固定秒数、speed=固定字/秒。 */
 const DEFAULT_GENERATION = {
-  mode: 'duration',
+  mode: 'instant',
   seconds: 4,
   charsPerSecond: 200,
 };
@@ -128,6 +130,7 @@ function sanitizeReadingStyle(input, base) {
   if (input.pagePadding !== undefined) style.pagePadding = clampInt(input.pagePadding, 0, 64, style.pagePadding);
   if (input.pageMaxWidth !== undefined) style.pageMaxWidth = clampInt(input.pageMaxWidth, 0, 1400, style.pageMaxWidth);
   if (input.fontFamily !== undefined) style.fontFamily = String(input.fontFamily).trim().slice(0, 80);
+  if (input.flip === 'none' || input.flip === 'fast' || input.flip === 'normal') style.flip = input.flip;
   return style;
 }
 
@@ -346,6 +349,7 @@ export function apply(ctx, rawConfig) {
     pagePadding: config.readingPagePadding,
     pageMaxWidth: config.readingPageMaxWidth,
     fontFamily: config.readingFontFamily,
+    flip: config.readingFlip,
   }, DEFAULT_READING_STYLE);
   function effectiveReadingStyle() {
     return sanitizeReadingStyle(settings.readingStyle, configReadingStyle);
@@ -371,6 +375,8 @@ export function apply(ctx, rawConfig) {
     clientContactAt: 0,
     // 当前运行的代码代次（见 BUILD_MARKER）。
     build: '',
+    // 浏览器半最近一次上报的翻页渲染诊断（排障用）。
+    uiDebug: null,
   };
   /** 已扫描到的小说目录：id -> { id, file, path, chars }。 */
   let catalog = new Map();
@@ -483,6 +489,52 @@ export function apply(ctx, rawConfig) {
     return generationPayload();
   }
 
+  /** 取当前进度之后的下一段/下一章，并推进进度；给翻页阅读器的「下一章」按钮用。 */
+  async function nextChapterForSession(sessionId, peek) {
+    const active = activeNovelForSession(sessionId);
+    if (!active) throw new Error('会话不在阅读模式');
+    if (active.missing) throw new Error('小说文件不存在，请刷新列表');
+    const meta = active.meta;
+    const { text, chapters } = await readNovelText(meta);
+    const total = text.length;
+    const chapterMode = chaptersEnabled && chapters.length > 0;
+    const offset = offsetOf(meta.id, total);
+    if (offset >= total) {
+      return { text: '', chapter: null, offset: total, finished: true, hasMore: false, name: displayName(meta) };
+    }
+    let from = offset;
+    let to = offset;
+    let chapterInfo = null;
+    if (chapterMode) {
+      const chapter = chapterAt(chapters, offset);
+      from = Math.max(offset, chapter.start);
+      to = chapter.end;
+      chapterInfo = { index: chapter.index, total: chapters.length, title: chapter.title };
+    } else {
+      const chunk = takeChunk(text, offset, chunkChars);
+      from = chunk.start;
+      to = chunk.end;
+    }
+    if (to <= from) {
+      return { text: '', chapter: chapterInfo, offset, finished: true, hasMore: false, name: displayName(meta) };
+    }
+    const display = displayParagraphs(text.slice(from, to))
+      .map((paragraph) => paragraph.display)
+      .join('\n\n');
+    if (peek !== true) {
+      state.progress[meta.id] = to;
+      await saveNow().catch(() => {});
+    }
+    return {
+      text: display,
+      chapter: chapterInfo,
+      offset: to,
+      finished: to >= total,
+      hasMore: to < total,
+      name: displayName(meta),
+    };
+  }
+
   async function loadState() {
     try {
       const parsed = JSON.parse(stripBom(await fsp.readFile(statePath, 'utf8')));
@@ -507,6 +559,7 @@ export function apply(ctx, rawConfig) {
         state.clientContactAt = parsed.clientContactAt;
       }
       if (typeof parsed.build === 'string') state.build = parsed.build;
+      if (parsed.uiDebug && typeof parsed.uiDebug === 'object') state.uiDebug = parsed.uiDebug;
     } catch (error) {
       if (error && error.code !== 'ENOENT') {
         ctx.logger?.warn?.(`${PLUGIN_ID}: 读取状态文件失败：${String(error.message || error)}`);
@@ -533,6 +586,7 @@ export function apply(ctx, rawConfig) {
         sessions: state.sessions,
         clientContactAt: state.clientContactAt,
         build: state.build,
+        uiDebug: state.uiDebug,
       });
       // 唯一临时名：热重载时新旧实例可能同进程并发写同一状态文件。
       const temp = `${statePath}.${process.pid}.${++saveSeq}.${Math.random().toString(36).slice(2, 8)}.tmp`;
@@ -765,26 +819,60 @@ export function apply(ctx, rawConfig) {
     const textIndex = thinking ? 1 : 0;
     const deltaType = thinking ? 'reasoning-delta' : 'text-delta';
     const summary = thinking ? renderSummary(meta, end) : '';
-    // 出字节奏按「正文 + 固定总结」的总片段数计算：duration 模式才真的整条 N 秒。
+    const displayText = paragraphs.map((paragraph) => paragraph.display).join('\n\n');
+    const reasoningText = thinking ? `${READING_MARKER}\n\n${displayText}` : displayText;
+
+    // 瞬间生成：整段只发一两个 delta。逐 4 字发会有上千个 chunk，光调度/渲染开销就要十来秒。
+    if (generation.mode === 'instant') {
+      try {
+        yield { type: 'block-start', index: contentIndex, blockType: thinking ? 'reasoning' : 'text' };
+        yield { type: deltaType, index: contentIndex, text: reasoningText };
+        yield {
+          type: 'block-end',
+          index: contentIndex,
+          block: thinking ? { type: 'reasoning', text: reasoningText } : { type: 'text', text: reasoningText },
+        };
+        if (thinking) {
+          yield { type: 'block-start', index: textIndex, blockType: 'text' };
+          yield { type: 'text-delta', index: textIndex, text: summary };
+          yield { type: 'block-end', index: textIndex, block: { type: 'text', text: summary } };
+        }
+        state.progress[meta.id] = end;
+        await saveNow().catch(() => {});
+        yield { type: 'finish', reason: { kind: 'stop' } };
+        return;
+      } catch (error) {
+        state.progress[meta.id] = end;
+        await saveNow().catch(() => {});
+        throw error;
+      }
+    }
+
+    // duration/speed 模式：把每片放大到几十字，片数控制在几十个，人工延迟才不会被单 chunk 开销吃掉。
+    const totalChars = displayText.length + summary.length;
+    let chunkSize = DELTA_CHARS;
+    if (generation.mode === 'duration') {
+      const targetPieces = Math.min(120, Math.max(12, Math.ceil(totalChars / 50)));
+      chunkSize = Math.max(DELTA_CHARS, Math.ceil(totalChars / targetPieces));
+    } else {
+      chunkSize = Math.max(8, Math.min(80, Math.round(generation.charsPerSecond / 5)));
+    }
     const contentPieces = paragraphs.reduce(
-      (count, paragraph) => count + Math.ceil(paragraph.display.length / DELTA_CHARS),
+      (count, paragraph) => count + Math.ceil(paragraph.display.length / chunkSize),
       0,
     ) + Math.max(0, paragraphs.length - 1);
-    const summaryPieces = summary.length > 0 ? Math.ceil(summary.length / DELTA_CHARS) : 0;
+    const summaryPieces = summary.length > 0 ? Math.ceil(summary.length / chunkSize) : 0;
     const totalPieces = Math.max(1, contentPieces + summaryPieces);
-    let pieceDelay = 0;
-    if (generation.mode === 'duration') {
-      pieceDelay = (generation.seconds * 1000) / totalPieces;
-    } else if (generation.mode === 'speed') {
-      pieceDelay = 4000 / generation.charsPerSecond;
-    }
+    const pieceDelay = generation.mode === 'duration'
+      ? (generation.seconds * 1000) / totalPieces
+      : (chunkSize * 1000) / generation.charsPerSecond;
     const pace = function () {
       if (pieceDelay <= 0) return Promise.resolve();
       const jitter = generation.mode === 'speed' ? 0.9 + Math.random() * 0.2 : 1;
       return sleep(Math.max(1, Math.round(pieceDelay * jitter)), signal);
     };
-    const firstDelay = generation.mode === 'instant' ? 0 : firstTokenDelayMs;
-    if (firstDelay > 0) await sleep(firstDelay, signal);
+    // 真实模型有首字延迟，先停一下再开始出字，观感更像一次正常请求。
+    if (firstTokenDelayMs > 0) await sleep(firstTokenDelayMs, signal);
     yield { type: 'block-start', index: contentIndex, blockType: thinking ? 'reasoning' : 'text' };
     // 「思考」正文前加一个隐形标记：浏览器半看到它就切换到翻页阅读器；正常模型思考没有这个标记。
     if (thinking) {
@@ -801,10 +889,10 @@ export function apply(ctx, rawConfig) {
           await pace();
         }
         const display = paragraph.display;
-        for (let offset = 0; offset < display.length; offset += DELTA_CHARS) {
+        for (let offset = 0; offset < display.length; offset += chunkSize) {
           if (signal && signal.aborted) throw abortError(signal);
-          yield { type: deltaType, index: contentIndex, text: display.slice(offset, offset + DELTA_CHARS) };
-          if (offset + DELTA_CHARS < display.length) await pace();
+          yield { type: deltaType, index: contentIndex, text: display.slice(offset, offset + chunkSize) };
+          if (offset + chunkSize < display.length) await pace();
         }
         consumed += paragraph.rawLen;
       }
@@ -813,8 +901,6 @@ export function apply(ctx, rawConfig) {
       await saveNow().catch(() => {});
       throw error;
     }
-    const displayText = paragraphs.map((paragraph) => paragraph.display).join('\n\n');
-    const reasoningText = thinking ? `${READING_MARKER}\n\n${displayText}` : displayText;
     yield {
       type: 'block-end',
       index: contentIndex,
@@ -824,10 +910,10 @@ export function apply(ctx, rawConfig) {
     if (thinking) {
       try {
         yield { type: 'block-start', index: textIndex, blockType: 'text' };
-        for (let offset = 0; offset < summary.length; offset += DELTA_CHARS) {
+        for (let offset = 0; offset < summary.length; offset += chunkSize) {
           if (signal && signal.aborted) throw abortError(signal);
-          yield { type: 'text-delta', index: textIndex, text: summary.slice(offset, offset + DELTA_CHARS) };
-          if (offset + DELTA_CHARS < summary.length) await pace();
+          yield { type: 'text-delta', index: textIndex, text: summary.slice(offset, offset + chunkSize) };
+          if (offset + chunkSize < summary.length) await pace();
         }
         yield { type: 'block-end', index: textIndex, block: { type: 'text', text: summary } };
       } catch (error) {
@@ -962,6 +1048,18 @@ export function apply(ctx, rawConfig) {
       case 'setGeneration': {
         const patch = args && args.generation && typeof args.generation === 'object' ? args.generation : {};
         return setGeneration(patch);
+      }
+      case 'nextChapter': {
+        const sessionId = args && args.sessionId;
+        if (typeof sessionId !== 'string' || sessionId.length === 0) throw new Error('缺少 sessionId');
+        return nextChapterForSession(sessionId, args.peek === true);
+      }
+      case 'debug': {
+        if (args && typeof args === 'object') {
+          state.uiDebug = { ...args, at: Date.now() };
+          scheduleSave();
+        }
+        return { ok: true };
       }
       default:
         throw new Error(`未知方法：${String(method)}`);

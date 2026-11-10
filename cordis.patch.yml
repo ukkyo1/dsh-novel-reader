@@ -5,7 +5,7 @@
         # 每段回复的字数（章节模式下只在没有章节标题时作为兜底）
         chunkChars: 420
         # 出字方式：instant = 瞬间生成；duration = 整条回复用固定秒数；speed = 固定字/秒
-        streamMode: duration
+        streamMode: instant
         # duration 模式的秒数（0.5-60）
         streamSeconds: 4
         # speed 模式的速度（字/秒，10-5000）
@@ -33,6 +33,8 @@
         readingPagePadding: 18
         readingPageMaxWidth: 0
         readingFontFamily: ""
+        # 翻页效果：none=无动画；fast=140ms 快速覆盖；normal=280ms 标准覆盖
+        readingFlip: fast
         # 小说目录；留空 = <DSH_HOME>/novels。留空时可以在「设置 → 小说阅读」里直接改目录；
         # 填了绝对路径则目录被配置固定，设置页只能看不能改。
         directory: ""

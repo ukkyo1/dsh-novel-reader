@@ -193,6 +193,8 @@ try {
   assert.notEqual(text1, text2, '两段内容不同');
 
   // ---- 5. 中断后从整段断点续读 --------------------------------------------
+  // 用 duration 模式留出中断窗口；instant 模式会一次发完整段，不存在可中断的中间态。
+  await rpcOk(first.state, 'setGeneration', { generation: { mode: 'duration', seconds: 2 } });
   const controller = new AbortController();
   const iterable = first.state.streamListener({ ...options, signal: controller.signal }, () => {
     throw new Error('next() 不应被调用');
@@ -219,6 +221,7 @@ try {
   const afterResume = await rpcOk(first.state, 'session', { sessionId });
   assert.ok(afterResume.offset > session2.offset, '续读继续推进');
   assertParagraphsFromSource(paragraphs3, file1.slice(afterAbort.offset, afterResume.offset));
+  await rpcOk(first.state, 'setGeneration', { generation: { mode: 'instant' } });
 
   // ---- 5.5 Markdown 危险标记的排版（伪装成正常 AI 回复） -----------------
   const hazardLines = [
@@ -423,6 +426,8 @@ try {
   assert.equal(clampedStyle.fontSize, 40, '字号越界收敛');
   assert.equal(clampedStyle.pageHeight, 240, '页高越界收敛');
   assert.equal(clampedStyle.lineHeight, 1.2, '行距越界收敛');
+  const flippedStyle = await rpcOk(first.state, 'setStyle', { style: { flip: 'normal' } });
+  assert.equal(flippedStyle.flip, 'normal', '翻页效果可设置');
   await rpcOk(first.state, 'setStyle', { style: styleDefaultsPayload.defaults });
   const resetStyle = await rpcOk(first.state, 'style');
   assert.equal(resetStyle.fontSize, 15, '恢复默认样式');
@@ -456,6 +461,46 @@ try {
   assert.equal(generationPersisted.mode, 'speed', '速度设置持久化');
   assert.equal(generationPersisted.charsPerSecond, 300);
   await rpcOk(generationReload.state, 'setGeneration', { generation: generationDefaults.defaults });
+
+  // ---- 5.11 出字速度实测（瞬间应真的快） -----------------------------------
+  await rpcOk(first.state, 'reset', { novelId: chapterNovel.id });
+  await rpcOk(first.state, 'setGeneration', { generation: { mode: 'instant', seconds: 4, charsPerSecond: 200 } });
+  await rpcOk(first.state, 'select', { sessionId: 'session-timing', novelId: chapterNovel.id });
+  const instantStart = Date.now();
+  const instantChunks = await consume(first.state, { ...options, sessionId: 'session-timing' });
+  const instantMs = Date.now() - instantStart;
+  const instantDeltas = instantChunks.filter((chunk) => chunk.type === 'text-delta' || chunk.type === 'reasoning-delta').length;
+  assert.ok(instantMs < 1500, `瞬间生成应在一秒左右完成，实际 ${instantMs}ms`);
+  assert.ok(instantDeltas <= 3, `瞬间生成不应拆成很多片段，实际 ${instantDeltas}`);
+  await rpcOk(first.state, 'setGeneration', { generation: { mode: 'duration', seconds: 1 } });
+  await rpcOk(first.state, 'select', { sessionId: 'session-timing-2', novelId: chapterNovel.id });
+  const durationStart = Date.now();
+  await consume(first.state, { ...options, sessionId: 'session-timing-2' });
+  const durationMs = Date.now() - durationStart;
+  assert.ok(durationMs >= 300 && durationMs < 4000, `指定 1 秒的回复不应过慢，实际 ${durationMs}ms`);
+  await rpcOk(first.state, 'select', { sessionId: 'session-timing', novelId: null });
+  await rpcOk(first.state, 'select', { sessionId: 'session-timing-2', novelId: null });
+  await rpcOk(first.state, 'setGeneration', { generation: generationDefaults.defaults });
+
+  // ---- 5.12 翻页阅读器的「下一章」RPC --------------------------------------
+  await rpcOk(first.state, 'reset', { novelId: chapterNovel.id });
+  await rpcOk(first.state, 'select', { sessionId: 'session-next', novelId: chapterNovel.id });
+  await consume(first.state, { ...options, sessionId: 'session-next' });
+  const beforePeek = await rpcOk(first.state, 'session', { sessionId: 'session-next' });
+  const peekedChapter = await rpcOk(first.state, 'nextChapter', { sessionId: 'session-next', peek: true });
+  const afterPeek = await rpcOk(first.state, 'session', { sessionId: 'session-next' });
+  assert.equal(afterPeek.offset, beforePeek.offset, 'peek 不推进进度');
+  assert.equal(peekedChapter.chapter.index, 2, 'peek 返回下一章');
+  const nextChapter1 = await rpcOk(first.state, 'nextChapter', { sessionId: 'session-next' });
+  assert.equal(nextChapter1.text, peekedChapter.text, '正式取章与预取内容一致');
+  assert.ok(typeof nextChapter1.text === 'string' && nextChapter1.text.length > 0, '下一章有正文');
+  assert.equal(nextChapter1.chapter.index, 2, '下一章序号正确');
+  assert.equal(nextChapter1.finished, false, '还有后续章节');
+  const nextChapter2 = await rpcOk(first.state, 'nextChapter', { sessionId: 'session-next' });
+  assert.equal(nextChapter2.chapter.index, 3, '再下一章序号正确');
+  const nextChapter3 = await rpcOk(first.state, 'nextChapter', { sessionId: 'session-next' });
+  assert.equal(nextChapter3.finished, true, '读到最后返回结束');
+  await rpcOk(first.state, 'select', { sessionId: 'session-next', novelId: null });
 
   // ---- 6. 标题 / 压缩 / 非聊天 purpose 分流 --------------------------------
   const titleChunks = await consume(first.state, { ...options, purpose: 'session-title' });

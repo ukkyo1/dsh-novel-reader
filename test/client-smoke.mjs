@@ -77,24 +77,18 @@ const ctx = {
 
 const before = injects.length;
 moduleExports.apply(ctx);
-assert.ok(injects.length >= before + 2, '触发按钮与设置页槽位已注入');
+assert.ok(injects.length >= before + 3, '触发按钮、设置页、思考正文槽位已注入');
 assert.ok(entries.some((entry) => entry.options.name === 'conversation.input.right'), '触发按钮已注册');
 assert.ok(entries.some((entry) => entry.options.name === 'settings.section'), '设置页已注册');
-assert.ok(!entries.some((entry) => entry.options.name === 'conversation.chat.reasoning.body'), '默认不接管思考正文');
-
-const trigger = entries.find((entry) => entry.options.name === 'conversation.input.right');
-const triggerProps = trigger.options.inject('session-smoke');
-assert.ok(triggerProps && typeof triggerProps.setReasoningBodyActive === 'function', '触发按钮拿到阅读态回调');
-assert.equal(typeof triggerProps.rpc, 'function');
-assert.equal(typeof triggerProps.t, 'function');
-
-triggerProps.setReasoningBodyActive(true);
-assert.ok(entries.some((entry) => entry.options.name === 'conversation.chat.reasoning.body'), '阅读模式打开后接管思考正文');
 const reasoning = entries.find((entry) => entry.options.name === 'conversation.chat.reasoning.body');
+assert.ok(reasoning, '思考正文渲染器已注册（始终接管）');
 assert.equal(reasoning.options.priority, 50, '用更小优先级覆盖官方渲染');
 assert.equal(reasoning.options.locale, 'dsh-novel-reader');
 
-triggerProps.setReasoningBodyActive(false);
+const trigger = entries.find((entry) => entry.options.name === 'conversation.input.right');
+const triggerProps = trigger.options.inject('session-smoke');
+assert.ok(triggerProps && typeof triggerProps.rpc === 'function', '触发按钮拿到 RPC');
+assert.equal(typeof triggerProps.t, 'function');
 for (const disposer of effects) {
   if (typeof disposer === 'function') {
     try { disposer(); } catch { /* 忽略 */ }
