@@ -6,9 +6,14 @@
 
 适合在地铁、睡前这种「只想往下读一点」的场景：不用切窗口，不用找滚动位置，进度会自动记住。
 
-## 示例
+## 使用示例
+**配置目录和小说别名**
+<img width="809" height="802" alt="image" src="https://github.com/user-attachments/assets/b17c453b-3579-4de1-b014-ca402c931b80" />
+**选择小说**
 <img width="1333" height="974" alt="image" src="https://github.com/user-attachments/assets/c609ef15-1f6a-4dc9-8a83-2980050a1779" />
+**输入任意内容继续阅读**（不能是阿拉伯数字，会触发章节跳转）
 <img width="1242" height="985" alt="image" src="https://github.com/user-attachments/assets/4c648ba5-ee1f-4dd9-b46b-3786dd136546" />
+**章节跳转**
 <img width="1323" height="1001" alt="image" src="https://github.com/user-attachments/assets/e00762c3-bcad-494d-9b78-7ff5a14ad576" />
 
 
