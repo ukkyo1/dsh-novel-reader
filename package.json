@@ -1,6 +1,6 @@
 {
   "name": "dsh-novel-reader",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Read local txt novels through the chat dialog: pick a novel beside the model selector, one message reads one chapter, and progress is remembered.",
   "license": "MIT",
   "author": "ukkyo1",

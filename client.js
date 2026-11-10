@@ -568,7 +568,13 @@
 .dnr-style-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .dnr-style-field--wide { grid-column: 1 / -1; }
 .dnr-style-label { font-size: 12px; line-height: 1.4; color: var(--dsw-alias-label-secondary, #6b6b6b); }
-.dnr-input--style { width: 100%; box-sizing: border-box; }
+.dnr-input--style {
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  box-sizing: border-box;
+}
 .dnr-settings-list { display: flex; flex-direction: column; gap: 10px; }
 .dnr-settings-note { font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-secondary, #6b6b6b); }
 .dnr-settings-error { font-size: 12px; line-height: 1.55; color: var(--dsw-alias-label-primary, #1f1e1d); }

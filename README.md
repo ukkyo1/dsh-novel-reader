@@ -22,7 +22,7 @@
 
 - **从 GitHub 安装**：`git clone https://github.com/ukkyo1/dsh-novel-reader.git`，然后在插件管理器（设置 → 插件 → 添加插件）里选本地目录安装；插件管理器如果支持 Git 地址，也可以直接填仓库地址。
 - **本地目录安装**：插件管理器选择从本地目录安装，目录填仓库根目录，安装并启用。
-- **离线包**：直接下载 [Release 里的 tgz](https://github.com/ukkyo1/dsh-novel-reader/releases/download/v0.7.0/dsh-novel-reader-0.7.0.tgz) 作为本地包安装（取决于插件管理器版本是否支持 tgz）；或在仓库根执行 `pnpm pack` 自己打一个。
+- **离线包**：直接下载 [Release 里的 tgz](https://github.com/ukkyo1/dsh-novel-reader/releases/download/v0.7.1/dsh-novel-reader-0.7.1.tgz) 作为本地包安装（取决于插件管理器版本是否支持 tgz）；或在仓库根执行 `pnpm pack` 自己打一个。
 - 启用后刷新一次 Web GUI 页面（`Ctrl+R`），输入框旁的「阅读模式」按钮就会出现；新会话也可以直接用。
 
 升级时在插件管理器里禁用再启用本插件（或重启 DSH），并刷新页面以加载新的浏览器半代码。
